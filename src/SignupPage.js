@@ -5,6 +5,7 @@ import { useState } from 'react';
 import InputGroup from 'react-bootstrap/InputGroup';
 import * as formik from 'formik';
 import * as yup from 'yup';
+
 import Button from 'react-bootstrap/Button';
 import Form from 'react-bootstrap/Form';
 
@@ -12,13 +13,14 @@ function submitLogin(data){
   console.log(data)
 }
 
-function LoginPage() {
+function SignupPage() {
 
   const { Formik } = formik;
 
   const schema = yup.object().shape({
     username: yup.string().required().min(3, 'Username needs at least 3 characters').max(30, 'Username is too long'),
     password: yup.string().required().min(5, 'Password too short'),
+    passwordConfirmation: yup.string().oneOf([yup.ref('password'), null], 'Passwords must match'),
     rememberMe: yup.bool(),
   });
 
@@ -55,7 +57,7 @@ function LoginPage() {
           <Form.Control
           style={{"width":"max(150px, min(350px ,100%))"}}
           type="password"
-          placeholder="Enter Password"
+          placeholder="Create Password"
           name="password"
           onChange={handleChange}
           value={values.password}
@@ -64,11 +66,25 @@ function LoginPage() {
           <Form.Control.Feedback type="invalid">{errors.password}</Form.Control.Feedback>
           </InputGroup>
         </Form.Group>
+        <Form.Group className="mb-3" controlId="formPasswordConfirmation">
+          <InputGroup hasValidation>
+          <Form.Control
+          style={{"width":"max(150px, min(350px ,100%))"}}
+          type="password"
+          placeholder="Confirm Password"
+          name="passwordConfirmation"
+          onChange={handleChange}
+          value={values.passwordConfirmation}
+          isInvalid={!!errors.passwordConfirmation}
+          />
+          <Form.Control.Feedback type="invalid">{errors.passwordConfirmation}</Form.Control.Feedback>
+          </InputGroup>
+        </Form.Group>
         <Form.Group className="mb-3" controlId="formRememberMe">
           <Form.Check type="checkbox" label="Remember me?"/>
         </Form.Group>
         <Button variant="primary" type="submit" style={{"width":"max(78px, min(85px, 20%))"}}>
-          Login
+          Sign Up
         </Button>
       </Form>
     )}
@@ -114,4 +130,4 @@ function LoginPage() {
 }
 */
 
-export default LoginPage;
+export default SignupPage;

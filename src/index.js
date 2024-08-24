@@ -27,11 +27,14 @@ const router = createBrowserRouter([
   },
   {
     path: "/login",
-    element: <div className="App">
+    element:
+    <div>
+    <div className="App">
     <Navigationbar/>
-    <header className="App-header">
-      <LoginPage/>
-    </header>
+    </div>
+    <div className="Login-form-bg">
+        <LoginPage/>
+    </div>
     </div>
   },
 ]);

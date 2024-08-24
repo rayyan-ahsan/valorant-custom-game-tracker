@@ -18,6 +18,15 @@
   color: white;
 }
 
+.Login-form-bg{
+  background-color: #282c34;
+  text-align: left;
+  align-items: center;
+  flex-direction: column;
+  min-height: calc(100dvh - 56px);
+  color:white;
+}
+
 .App-link {
   color: #61dafb;
 }
@@ -31,4 +40,8 @@
 .btn-change:hover {
   transform: scale(1.1);
   background: 'blue'
+}
+
+.modalFooter {
+  justify-content: center!important;
 }
