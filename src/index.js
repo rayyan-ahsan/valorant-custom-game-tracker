@@ -14,6 +14,9 @@ import "bootstrap/dist/js/bootstrap.bundle.min";
 import LoginPage from './LoginPage';
 import Queue from './Queue';
 import Navigationbar from './Navigationbar';
+import GamePage from './GamePage';
+import SignupPage from './SignupPage';
+import BOPollVote from './BestOfSeriesPoll';
 
 const router = createBrowserRouter([
   {
@@ -34,6 +37,42 @@ const router = createBrowserRouter([
     </div>
     <div className="Login-form-bg">
         <LoginPage/>
+    </div>
+    </div>
+  },
+  {
+    path: "/game",
+    element:
+    <div>
+    <div className="App">
+    <Navigationbar/>
+    </div>
+    <div className="Login-form-bg">
+        <GamePage/>
+    </div>
+    </div>
+  },
+  {
+    path: "/signup",
+    element:
+    <div>
+    <div className="App">
+    <Navigationbar/>
+    </div>
+    <div className="Login-form-bg">
+        <SignupPage/>
+    </div>
+    </div>
+  },
+  {
+    path: "/stats",
+    element:
+    <div>
+    <div className="App">
+    <Navigationbar/>
+    </div>
+    <div className="Login-form-bg">
+        <div style={{padding: "10px"}}>Work in progress sorry :3</div>
     </div>
     </div>
   },

@@ -5,33 +5,57 @@ import { useState } from 'react';
 import InputGroup from 'react-bootstrap/InputGroup';
 import * as formik from 'formik';
 import * as yup from 'yup';
+import { useNavigate } from 'react-router-dom';
 
 import Button from 'react-bootstrap/Button';
 import Form from 'react-bootstrap/Form';
 
-function submitLogin(data){
-  console.log(data)
+async function submitSignup(data, navigate) {
+  try {
+    const response = await fetch('/signup', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      throw new Error('Network response was not ok');
+    }
+
+    const res = await response.json();
+    navigate('/login')
+
+    // Handle successful response
+    console.log('User created successfully:', res);
+    // Redirect or show a success message
+    // Example: history.push('/login'); // if using react-router for navigation
+  } catch (error) {
+    console.error('There was a problem with the fetch operation:', error);
+    // Handle error response
+    // Example: show an error message to the user
+  }
 }
 
 function SignupPage() {
 
   const { Formik } = formik;
+  const navigate = useNavigate();
 
   const schema = yup.object().shape({
     username: yup.string().required().min(3, 'Username needs at least 3 characters').max(30, 'Username is too long'),
     password: yup.string().required().min(5, 'Password too short'),
     passwordConfirmation: yup.string().oneOf([yup.ref('password'), null], 'Passwords must match'),
-    rememberMe: yup.bool(),
   });
 
   return (
     <div className="Login-form">
 <Formik
       validationSchema={schema}
-      onSubmit={submitLogin}
+      onSubmit={(values) => submitSignup(values, navigate)}
       initialValues={{
         username: '',
-        rememberMe: false,
       }}
     >
     {({handleSubmit, handleChange, values, errors }) => (
@@ -79,9 +103,6 @@ function SignupPage() {
           />
           <Form.Control.Feedback type="invalid">{errors.passwordConfirmation}</Form.Control.Feedback>
           </InputGroup>
-        </Form.Group>
-        <Form.Group className="mb-3" controlId="formRememberMe">
-          <Form.Check type="checkbox" label="Remember me?"/>
         </Form.Group>
         <Button variant="primary" type="submit" style={{"width":"max(78px, min(85px, 20%))"}}>
           Sign Up

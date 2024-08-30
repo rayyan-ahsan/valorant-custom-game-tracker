@@ -7,26 +7,59 @@ import * as formik from 'formik';
 import * as yup from 'yup';
 import Button from 'react-bootstrap/Button';
 import Form from 'react-bootstrap/Form';
+import { useNavigate } from 'react-router-dom'
 
-function submitLogin(data){
-  console.log(data)
+async function submitLogin(values, navigate) {
+  try {
+    const response = await fetch('/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(values),
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      throw new Error('Login failed');
+    }
+
+    const data = await response.json();
+
+    // Handle successful response
+    console.log('Login successful:', data);
+    navigate('/')
+
+    // Example: Redirect to another page or show a success message
+    // Example: history.push('/dashboard'); // If using react-router for navigation
+  } catch (error) {
+    console.error('There was a problem with the login:', error);
+    setError('Invalid username or password. Please try again.');
+  }
 }
 
 function LoginPage() {
 
   const { Formik } = formik;
+  const navigate = useNavigate();
+  const [error, setError] = useState(null);
 
   const schema = yup.object().shape({
-    username: yup.string().required().min(3, 'Username needs at least 3 characters').max(30, 'Username is too long'),
-    password: yup.string().required().min(5, 'Password too short'),
+    username: yup.string().required(),
+    password: yup.string().required(),
     rememberMe: yup.bool(),
   });
 
   return (
     <div className="Login-form">
+      {error && (
+        <Alert variant="danger" onClose={() => setError(null)} dismissible>
+          {error}
+        </Alert>
+      )}
 <Formik
       validationSchema={schema}
-      onSubmit={submitLogin}
+      onSubmit={(values) => submitLogin(values, navigate)}
       initialValues={{
         username: '',
         rememberMe: false,

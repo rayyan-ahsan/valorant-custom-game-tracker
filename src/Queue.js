@@ -1,26 +1,173 @@
 import { useState, useEffect } from 'react';
 import Button from 'react-bootstrap/Button';
 import Modal from 'react-bootstrap/Modal';
+import Alert from 'react-bootstrap/Alert';
 import './App.css';
-import MatchFound from './MatchFound';
+import MatchFound, { startTimer } from './MatchFound';
+import { useNavigate } from 'react-router-dom';
 import { useModal } from './MatchFound';
+import { AlertTriangle } from 'lucide-react';
 
-const eventSource = new EventSource('/queuenumbers');
+/*
+function AlertDismissibleExample({ show, handleClose }) {
+  return(
+    <>
+        <Modal
+          show={show}
+          onHide={handleClose}
+          backdrop="static"
+          aria-labelledby="contained-modal-title-vcenter"
+          centered
+          keyboard={false}
+          className=""
+        >
+          <Modal.Header className="modal-header border-bottom-0 justify-content-center padding-bottom-0!important">
+            <Modal.Title>
+            Error
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body className="modal-body text-center">You must leave your game in order to queue.</Modal.Body>
+          <Modal.Footer className="justify-content-center border-top-0">
+            <Button id="acceptBtn" variant="primary" onClick={handleClose}>Okay</Button>
+          </Modal.Footer>
+        </Modal>
+      </>
+    );
+}
 
-eventSource.addEventListener('message', (event) => {
-  const message = event.data;
+*/
 
-  document.getElementById("pplInQueue").textContent = message
-  console.log('Received Message: ', message)
-});
+function AlertDismissibleExample({ show, handleClose }) {
+  return (
+    <Modal
+      show={show}
+      onHide={handleClose}
+      centered
+      size="sm"
+    >
+      <Modal.Header className="bg-danger text-white border-bottom-0">
+        <Modal.Title className="d-flex align-items-center">
+          <AlertTriangle className="me-2" />
+          Error
+        </Modal.Title>
+      </Modal.Header>
+      <Modal.Body className="text-center py-4">
+        You must leave your game in order to queue.
+      </Modal.Body>
+      <Modal.Footer className="border-top-0 justify-content-center">
+        <Button variant="outline-danger" onClick={handleClose}>
+          Okay
+        </Button>
+      </Modal.Footer>
+    </Modal>
+  );
+}
 
-eventSource.addEventListener('error', (error) => {
-  console.error('Error occurred: ', error);
-});
+
 
 function Queue() {
 
   const { show, handleClose, handleShow } = useModal();
+  const [queueEventSource, setQueueEventSource] = useState(null);
+  const [inQueue, setInQueue] = useState(false);
+  const [username, setUsername] = useState(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [gameId, setGameId] = useState(null)
+  const [inGame, setInGame] = useState(0)
+  const navigate = useNavigate();
+  const [showAlert, setShowAlert] = useState(false);
+  const [alertMessage, setAlertMessage] = useState('');
+  const [timerInterval, setTimerInterval] = useState(null);
+
+  const handleCloseAlert = () => setShowAlert(false)
+  const handleShowAlert = () => setShowAlert(true)
+
+  
+ 
+  const checkLoginStatus = async () => {
+    try {
+      const response = await fetch('/api/user', {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (response.ok) {
+        const data = await response.json();
+        console.log("THE USERNAME IS", data.username)
+        console.log("queue gameId is: ", data.gameId)
+        console.log("ingame? :", data.inGame)
+        setUsername(data.username);
+        setGameId(data.gameId)
+        setIsLoggedIn(true);
+      } else {
+        setIsLoggedIn(false);
+      }
+    } catch (error) {
+      console.error('Error checking login status:', error);
+      setIsLoggedIn(false);
+    }
+  };
+
+  useEffect(() => {
+    checkLoginStatus();
+  }, [])
+
+  useEffect(() => {
+
+    let heartbeatInterval;
+    // Set up the EventSource when the component mounts
+    const eventSource = new EventSource('/queuenumbers');
+    setQueueEventSource(eventSource);
+
+    eventSource.addEventListener('message', (event) => {
+      const message = event.data;
+      document.getElementById("pplInQueue").textContent = message;
+      console.log('Received Message: ', message);
+    });
+
+    eventSource.addEventListener('error', (error) => {
+      console.error('Error occurred: ', error);
+    });
+
+    const sendHeartbeat = async () => {
+      try {
+        const response = await fetch(`/heartbeat?username=${username}`, {
+          method: 'GET',
+        });
+
+        if (response.ok) {
+          console.log('Heartbeat sent for', username);
+        } else {
+          console.error('Error sending heartbeat:', response.statusText);
+        }
+      } catch (error) {
+        console.error('Error sending heartbeat:', error);
+      }
+    };
+
+    if(inQueue){
+      heartbeatInterval = setInterval(sendHeartbeat, 3000);
+      sendHeartbeat();
+    }
+
+    // Clean up the EventSource when the component unmounts
+    return () => {
+      if (heartbeatInterval){
+        clearInterval(heartbeatInterval)
+      }
+      setInQueue(false)
+      eventSource.close()
+      setQueueEventSource(null)
+      console.log('EventSource closed');
+    };
+  }, [inQueue, username]); 
+
+  function handleButtonClick() {
+    if (!isLoggedIn) {
+      navigate('/login');
+    } else {
+      click();
+    }
+  }
 
   function click() {
 
@@ -48,59 +195,93 @@ function Queue() {
         clearInterval(x);
       }
     }, 1000);
+    setTimerInterval(x)
     fetch("/queue", {
       method: "POST",
+      credentials: "include",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
-        "username": "MistaDong",
+        "username": username,
         "inQueue": "1"
       })
     })
     .then((res) => res.json())
     .then((data) => {
       console.log(data);
+      setInQueue(true)
     })
     .catch((err) => {
+      clearInterval(x)
       console.log(err.message);
+      button.className = "btn btn-lg btn-success btn-change"
+      button.textContent = "Join Queue"
+      setAlertMessage(err.message);
+      setShowAlert(true);
+      setInQueue(false);
     })
   
-    const inQueueEventSource = new EventSource('/api/inqueue');
-
-    inQueueEventSource.addEventListener('message', (event) => {
-      const message = event.data;
-      if(message === "MATCH FOUND"){
-        handleShow()
-        var timeLeft = 30;
-        var elem = document.getElementById("fakeModalTitle");
-        var timerId = setInterval(countdown, 1000)
-        function countdown(){
-          if(timeLeft == -1){
-            clearTimeout(timerId)
-            handleClose()
-          } else {
-            elem.innerHTML = "Match Found (" + timeLeft + ")"
-            timeLeft--;
-          }
-    }
-        clearInterval(x)
-        button.className = "btn btn-success btn-lg btn-change"
-        button.textContent = "Join Queue"
-      }
-      console.log('Received Message: ', message)
-    });
-  
-    inQueueEventSource.addEventListener('error', (error) => {
-      console.error('Error occurred: ', error);
-    });
   }
 
+  useEffect(() => {
+
+    let inQueueEventSource
+
+    if(inQueue){
+
+      const inQueueEventSource = new EventSource('/api/inqueue');
+
+      inQueueEventSource.addEventListener('message', (event) => {
+        const message = event.data;
+        if(/MATCH FOUND:/.test(message)){
+          console.log("ITS THE INQUEUEEVENTSOURCE YA DINGUS")
+          //setGameId(message.slice(-5))
+          setGameId("test1")
+          handleShow()
+          clearInterval(timerInterval)
+          setTimerInterval(null)
+          const button = document.getElementById("queueBtn")
+          button.className = "btn btn-success btn-lg btn-change"
+          button.textContent = "Join Queue"
+          inQueueEventSource.close()
+        }
+        console.log('Received Message: ', message)
+      });
+    
+      inQueueEventSource.addEventListener('error', (error) => {
+        console.error('Error occurred: ', error);
+      });
+
+    }
+
+    return(() => {
+      if(inQueueEventSource){
+        inQueueEventSource.close()
+      }
+    })
+
+  }, [inQueue, timerInterval])
+
   return (
-    <div class="d-grid gap-2 col-3 mx-auto" className="QueueButtonDiv">
-        <button id="queueBtn" type="button" class="btn btn-success btn-lg btn-change" onClick={click}>Join Queue</button>
-        <p class="text-center" id="pplInQueue">0 people in queue</p>
-        <div id="fakeModalTitle" style={{"display":"none"}}></div>
-        <MatchFound show={show} handleClose={handleClose} />
+  <>
+    <div className="d-grid gap-2 col-3 mx-auto QueueButtonDiv">
+      <button
+        id="queueBtn"
+        type="button"
+        className={`btn btn-lg ${isLoggedIn ? 'btn-success btn-change' : 'btn-primary'}`}
+        onClick={handleButtonClick}
+      >
+        {isLoggedIn ? 'Join Queue' : 'Login to Queue'}
+      </button>
+      <p className="text-center" id="pplInQueue">
+        0 people in queue
+      </p>
+      <div id="fakeModalTitle" style={{ display: 'none' }}></div>
+      <MatchFound show={show} handleClose={handleClose} username={username} gameId={gameId}/>
     </div>
+    <div>
+    <AlertDismissibleExample show={showAlert} handleClose={handleCloseAlert} />
+    </div>
+  </>
   );
 }
 
