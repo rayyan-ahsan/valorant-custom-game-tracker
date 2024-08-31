@@ -49,8 +49,8 @@ func main() {
 /*
 func main() {
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "https://public-api.tracker.gg/v2/valorant/standard/profile/riot/rayyan%238140", nil)
-	req.Header.Set("TRN-Api-Key", "5a4efdfd-ab96-4f89-b62f-cccdb34a8678")
+	req, err := http.NewRequest("GET", "----", nil)
+	req.Header.Set("TRN-Api-Key", "----")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Encoding", "gzip")
 
