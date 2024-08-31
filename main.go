@@ -1378,6 +1378,7 @@ func monitorQueue(db *sql.DB, slice []queuePlayers) {
 
 func main() {
 
+	ADDR := os.Getenv("ADDR")
 	PORT := os.Getenv("PORT")
 
 	db, err := sql.Open("sqlite", "maindb.db")
@@ -2282,5 +2283,9 @@ func main() {
 		<-ctx().Done()
 	}))
 
-	http.ListenAndServe(":"+PORT, mux)
+	if PORT == "" {
+		PORT = "3000"
+	}
+	fmt.Println(ADDR + ":" + PORT)
+	http.ListenAndServe(ADDR+":"+PORT, mux)
 }
