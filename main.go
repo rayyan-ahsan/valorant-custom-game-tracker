@@ -1450,9 +1450,9 @@ func main() {
 	// http.FileServer(http.Dir("./FrontEnd/valorant-custom-game-tracker/build"))
 	mux := http.NewServeMux()
 	fmt.Print("Hi we are listening :D")
-	mux.Handle("/", http.FileServer(http.Dir("./FrontEnd/valorant-custom-game-tracker/build")))
-	mux.Handle("/login/", http.StripPrefix("/login/", http.FileServer(http.Dir("./FrontEnd/valorant-custom-game-tracker/build"))))
-	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir("./FrontEnd/valorant-custom-game-tracker/build"))))
+	mux.Handle("/", http.FileServer(http.Dir("./FrontEnd/build")))
+	mux.Handle("/login/", http.StripPrefix("/login/", http.FileServer(http.Dir("./FrontEnd/build"))))
+	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.HandleFunc("/heartbeat", heartbeatHandler)
 	go monitorQueue(db, queuePlayersSlice)
 	//DEBUG PPROF
