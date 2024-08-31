@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Button from 'react-bootstrap/Button';
 import Modal from 'react-bootstrap/Modal';
 import Alert from 'react-bootstrap/Alert';
@@ -70,6 +70,8 @@ function Queue() {
   const { show, handleClose, handleShow } = useModal();
   const [queueEventSource, setQueueEventSource] = useState(null);
   const [inQueue, setInQueue] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [socket, setSocket] = useState(null);
   const [username, setUsername] = useState(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [gameId, setGameId] = useState(null)
@@ -82,8 +84,46 @@ function Queue() {
   const handleCloseAlert = () => setShowAlert(false)
   const handleShowAlert = () => setShowAlert(true)
 
-  
- 
+  const url = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/heartbeat?username=${username}`;
+
+  const connectWebSocket = useCallback(() => {
+    const newSocket = new WebSocket(url);
+    console.log("trying to connect or something haha wait did i even cache..")
+
+    newSocket.onopen = () => {
+        console.log('WebSocket connection established');
+        
+        setIsConnected(true);
+        setInQueue(true)
+    };
+
+    newSocket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'pong') {
+            console.log('Received pong from server');
+        } else if (message.type === 'queueUpdate') {
+            console.log(message.payload)
+        }
+    };
+
+    newSocket.onclose = () => {
+        console.log('WebSocket connection closed. Attempting to reconnect...');
+        setIsConnected(false);
+        setInQueue(false);
+        setTimerInterval(null)
+        const button = document.getElementById("queueBtn")
+        button.className = "btn btn-lg btn-success btn-change"
+        button.textContent = "Join Queue"
+        //setTimeout(connectWebSocket, 5000);
+    };
+
+    newSocket.onerror = (error) => {
+        console.error(`WebSocket error: ${error}`);
+    };
+
+    setSocket(newSocket);
+  }, [username]);
+
   const checkLoginStatus = async () => {
     try {
       const response = await fetch('/api/user', {
@@ -113,7 +153,6 @@ function Queue() {
 
   useEffect(() => {
 
-    let heartbeatInterval;
     // Set up the EventSource when the component mounts
     const eventSource = new EventSource('/queuenumbers');
     setQueueEventSource(eventSource);
@@ -128,38 +167,14 @@ function Queue() {
       console.error('Error occurred: ', error);
     });
 
-    const sendHeartbeat = async () => {
-      try {
-        const response = await fetch(`/heartbeat?username=${username}`, {
-          method: 'GET',
-        });
-
-        if (response.ok) {
-          console.log('Heartbeat sent for', username);
-        } else {
-          console.error('Error sending heartbeat:', response.statusText);
-        }
-      } catch (error) {
-        console.error('Error sending heartbeat:', error);
-      }
-    };
-
-    if(inQueue){
-      heartbeatInterval = setInterval(sendHeartbeat, 3000);
-      sendHeartbeat();
-    }
-
     // Clean up the EventSource when the component unmounts
     return () => {
-      if (heartbeatInterval){
-        clearInterval(heartbeatInterval)
-      }
       setInQueue(false)
       eventSource.close()
       setQueueEventSource(null)
       console.log('EventSource closed');
     };
-  }, [inQueue, username]); 
+  }, [inQueue, username]);
 
   function handleButtonClick() {
     if (!isLoggedIn) {
@@ -209,6 +224,7 @@ function Queue() {
     .then((data) => {
       console.log(data);
       setInQueue(true)
+      connectWebSocket()
     })
     .catch((err) => {
       clearInterval(x)
@@ -234,8 +250,8 @@ function Queue() {
         const message = event.data;
         if(/MATCH FOUND:/.test(message)){
           console.log("ITS THE INQUEUEEVENTSOURCE YA DINGUS")
-          //setGameId(message.slice(-5))
-          setGameId("test1")
+          setGameId(message.slice(-5))
+          //setGameId("test1")
           handleShow()
           clearInterval(timerInterval)
           setTimerInterval(null)

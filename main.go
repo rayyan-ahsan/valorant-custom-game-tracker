@@ -19,7 +19,8 @@ import (
 
 	"net/http/pprof"
 
-	_ "modernc.org/sqlite"
+	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
 )
 
 type SignupData struct {
@@ -156,6 +157,11 @@ type EventMessage struct {
 	Data      string `json:"data"`
 }
 
+type Message struct {
+	Type    string `json:"type"`
+	Payload string `json:"payload"`
+}
+
 type boVotes struct {
 	GameId string
 	Votes  []int
@@ -256,7 +262,7 @@ func dbRead(db *sql.DB) {
 		ID       int
 		Username string
 	)
-	rows, err := db.Query("select ID, Username from Users where ID = ?", 1)
+	rows, err := db.Query(`SELECT "ID", "Username" FROM "Users" WHERE "ID" = $1`, 1)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -275,97 +281,72 @@ func dbRead(db *sql.DB) {
 }
 
 func dbCheckUsersTable(db *sql.DB) {
-	query := `
-		SELECT name 
-		FROM sqlite_master 
-		WHERE type='table' AND name='Users';`
 
-	var tableName string
-	err := db.QueryRow(query).Scan(&tableName)
+	createTableQuery := `
+    CREATE TABLE IF NOT EXISTS "Users" (
+        "ID" SERIAL PRIMARY KEY,
+        "Username" TEXT NOT NULL UNIQUE,
+        "HashedPassword" TEXT NOT NULL,
+        "Salt" BYTEA NOT NULL,
+        "InQueue" boolean NOT NULL DEFAULT false,
+        "InGame" boolean NOT NULL DEFAULT false,
+        "GameId" TEXT,
+        CHECK(("InGame" = false AND "GameId" IS NULL) OR ("InGame" = true AND "GameId" IS NOT NULL)),
+        CHECK(("InGame" = false AND "InQueue" = false) OR ("InGame" = true AND "InQueue" = false) OR ("InGame" = false AND "InQueue" = true))
+    );`
 
+	_, err := db.Exec(createTableQuery)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// Table does not exist, create it
-			createTableQuery := `
-			CREATE TABLE "Users" (
-				"ID" INTEGER NOT NULL UNIQUE,
-				"Username" TEXT NOT NULL UNIQUE,
-				"HashedPassword" TEXT NOT NULL,
-				"Salt" BLOB NOT NULL,
-				"InQueue" INTEGER NOT NULL DEFAULT 0,
-				"InGame" INTEGER NOT NULL DEFAULT 0,
-				"GameId" TEXT,
-				PRIMARY KEY("ID" AUTOINCREMENT),
-				CHECK(("InGame" = 0 AND "GameId" IS NULL) OR ("InGame" = 1 AND "GameId" IS NOT NULL)),
-				CHECK(("InGame" = 0 AND "InQueue" = 0) OR ("InGame" = 1 AND "InQueue" = 0) OR ("InGame" = 0 AND "InQueue" = 1))
-			);`
-
-			_, err = db.Exec(createTableQuery)
-			if err != nil {
-				log.Fatalf("Failed to create Users table: %v", err)
-			}
-			fmt.Println("Users table created successfully.")
-		} else {
-			log.Fatalf("Failed to check if table exists: %v", err)
-		}
-	} else {
-		// Table exists
-		fmt.Println("Users table already exists.")
+		log.Fatalf("Failed to create Users table: %v", err)
 	}
+	fmt.Println("Users table is present or created successfully.")
 }
 
 func dbSetInQueue(db *sql.DB, reactUsername string) error {
-	stmt, err := db.Prepare("UPDATE Users SET InQueue = 1 WHERE UPPER(Username) = Upper(\"" + reactUsername + "\")")
+	query := `UPDATE "Users" 
+              SET "InQueue" = true 
+              WHERE UPPER("Username") = UPPER($1)`
+	_, err := db.Exec(query, reactUsername)
 	if err != nil {
-		return err
-	}
-
-	defer stmt.Close()
-
-	_, err = stmt.Exec()
-	if err != nil {
-		return err
+		return fmt.Errorf("failed to update InQueue: %w", err)
 	}
 
 	return nil
 }
 
 func dbInsertUsername(db *sql.DB, u string) {
-	stmt, err := db.Prepare("INSERT INTO Users(Username, InQueue) VALUES(?, ?)")
+
+	query := `INSERT INTO "Users" ("Username", "InQueue") 
+              VALUES ($1, $2) 
+              RETURNING "ID"`
+
+	var lastId int
+	err := db.QueryRow(query, u, 1).Scan(&lastId)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to insert username: %v", err)
 	}
 
-	defer stmt.Close()
-
-	res, err := stmt.Exec(u, 1)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	lastId, err := res.LastInsertId()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	rowCnt, err := res.RowsAffected()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("ID = %d, affected = %d\n", lastId, rowCnt)
+	log.Printf("ID = %d, affected = %d\n", lastId, 1)
 }
 
 func dbGetPlayers(db *sql.DB, id string) ([]Lobby, error) {
 	var l []Lobby
-	rows, err := db.Query("SELECT g.UsernameId, u.Username, g.Captain, g.Team FROM \"" + id + "\" g JOIN Users u ON g.UsernameID = u.ID")
+
+	query := fmt.Sprintf(`SELECT g.UsernameId, u."Username", g.Captain, g.Team 
+                          FROM "%s" g 
+                          JOIN "Users" u ON g.UsernameId = u."ID"`, id)
+
+	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	res, err := dbCreateCaptains(db, id, rows)
 	if err != nil {
 		return nil, err
 	}
+
 	for _, player := range res {
 		var x Lobby
 		x.Username = player.Username
@@ -373,6 +354,7 @@ func dbGetPlayers(db *sql.DB, id string) ([]Lobby, error) {
 		x.Team = player.Team
 		l = append(l, x)
 	}
+
 	return l, nil
 }
 
@@ -385,26 +367,23 @@ func dbSetTeam(db *sql.DB, id string, username string, team int) {
 
 	if userID == 0 {
 		fmt.Println("User not found.")
-	} else {
-		fmt.Printf("User ID: %d\n", userID)
+		return
 	}
 
-	stmt, err := db.Prepare("UPDATE \"" + id + "\" SET Team = ? WHERE UsernameID = ?")
-	if err != nil {
-		panic(err)
-	}
+	fmt.Printf("User ID: %d\n", userID)
 
-	defer stmt.Close()
+	query := fmt.Sprintf(`UPDATE "%s" SET Team = $1 WHERE UsernameID = $2`, id)
 
-	res, err := stmt.Exec(team, userID)
+	_, err = db.Exec(query, team, userID)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(res)
 
+	fmt.Println("Team updated successfully.")
 }
 
 func dbSetCaptainsForTestPurposes(db *sql.DB, id string, username string, username2 string) {
+
 	userId, err := dbGetUseridFromUsername(db, username)
 	if err != nil {
 		log.Fatal(err)
@@ -414,32 +393,28 @@ func dbSetCaptainsForTestPurposes(db *sql.DB, id string, username string, userna
 		log.Fatal(err)
 	}
 
-	//db.Prepare("UPDATE \"" + id + "\" SET Captain = 1, Team = ? WHERE UsernameID = ?")
+	if userId == 0 {
+		fmt.Println("User not found:", username)
+		return
+	}
+	if user2Id == 0 {
+		fmt.Println("User not found:", username2)
+		return
+	}
 
-	stmt1, err := db.Prepare("UPDATE \"" + id + "\" SET Captain = 1, TEAM = ? WHERE UsernameID = ?")
+	query := fmt.Sprintf(`UPDATE "%s" SET Captain = $1, Team = $2 WHERE UsernameID = $3`, id)
+
+	_, err = db.Exec(query, 1, 1, userId)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	defer stmt1.Close()
-
-	_, err = stmt1.Exec(1, userId)
+	_, err = db.Exec(query, 1, 2, user2Id)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	stmt2, err := db.Prepare("UPDATE \"" + id + "\" SET Captain = 1, TEAM = ? WHERE UsernameID = ?")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	defer stmt2.Close()
-
-	_, err = stmt2.Exec(2, user2Id)
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	fmt.Println("Captains set successfully for both users.")
 }
 
 func dbCreateCaptains(db *sql.DB, id string, rows *sql.Rows) ([]Player, error) {
@@ -458,60 +433,62 @@ func dbCreateCaptains(db *sql.DB, id string, rows *sql.Rows) ([]Player, error) {
 		players = append(players, p)
 	}
 
-	fmt.Println("\nthese r the players: ", players)
-	fmt.Println("\nthese r how many players: ", len(players))
-
-	if len(players) < 2 {
-		fmt.Println("\n theres less than 2 players ya doofus")
-		return nil, nil
-	}
-
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
+	fmt.Println("\nThese are the players: ", players)
+	fmt.Println("\nNumber of players: ", len(players))
+
+	if len(players) < 2 {
+		fmt.Println("\nLess than 2 players.")
+		return nil, nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	if captainCount < 2 {
-		// Reset captains
+
 		for i := range players {
 			players[i].Captain = 0
 		}
 
-		// Randomly select two captains
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		for i := 0; i < 2; i++ {
-			for {
-				index := r.Intn(len(players))
-				if players[index].Captain == 0 {
-					players[index].Captain = 1
-					players[index].Team = i + 1 // Set team to 1 or 2
+		selected := 0
+		for selected < 2 {
+			index := r.Intn(len(players))
+			if players[index].Captain == 0 {
+				players[index].Captain = 1
+				players[index].Team = selected + 1
 
-					// Update the database
-					stmt, err := db.Prepare("UPDATE \"" + id + "\" SET Captain = 1, Team = ? WHERE UsernameID = ?")
-					if err != nil {
-						log.Fatal(err)
-					}
-					defer stmt.Close()
-					res, err := stmt.Exec(players[index].Team, players[index].UsernameID)
-					if err != nil {
-						return nil, err
-					}
-					fmt.Println(res)
-					if err := stmt.Close(); err != nil {
-						log.Fatal(err)
-					}
-
-					break
+				query := `UPDATE "` + id + `" SET Captain = $1, Team = $2 WHERE UsernameID = $3`
+				_, err := tx.Exec(query, players[index].Captain, players[index].Team, players[index].UsernameID)
+				if err != nil {
+					return nil, err
 				}
+
+				selected++
 			}
 		}
-	}
-	fmt.Println("\nthese r the players 2: ", players)
 
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+	}
+
+	fmt.Println("\nThese are the updated players: ", players)
 	return players, nil
 }
+
 func dbGetUseridFromUsername(db *sql.DB, username string) (int, error) {
 	var userID int
-	err := db.QueryRow("SELECT ID FROM Users WHERE UPPER(Username) = UPPER(?)", username).Scan(&userID)
+	query := `SELECT "ID" FROM "Users" WHERE UPPER("Username") = UPPER($1)`
+
+	err := db.QueryRow(query, username).Scan(&userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			fmt.Println("No user found with the specified username.")
@@ -523,21 +500,24 @@ func dbGetUseridFromUsername(db *sql.DB, username string) (int, error) {
 	return userID, nil
 }
 
-func dbAddAllPlayersToGame(db *sql.DB, id string) {
-	stmt, err := db.Prepare("INSERT INTO \"" + id + "\" (UsernameID, Captain, Team) SELECT ID, 0 AS Captain, 0 AS Team FROM Users WHERE InGame = 1 AND GameId = ?;")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer stmt.Close()
+func dbAddAllPlayersToGame(db *sql.DB, gameId string) {
 
-	_, err = stmt.Exec(id)
+	query := fmt.Sprintf(`
+        INSERT INTO "%s" (UsernameID, Captain, Team)
+        SELECT "ID", 0 AS Captain, 0 AS Team
+        FROM "Users"
+        WHERE "InGame" = true AND "GameId" = $1;
+    `, gameId)
+
+	_, err := db.Exec(query, gameId)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	fmt.Println("Players added to game successfully.")
 }
 
-func dbAddPlayerToGame(db *sql.DB, id string, username string) {
-
+func dbAddPlayerToGame(db *sql.DB, tableName string, username string) {
 	fmt.Print("\ndbAddPlayerToGame beginning: ", time.Now())
 
 	userID, err := dbGetUseridFromUsername(db, username)
@@ -549,42 +529,59 @@ func dbAddPlayerToGame(db *sql.DB, id string, username string) {
 
 	if userID == 0 {
 		fmt.Println("User not found.")
-	} else {
-		fmt.Printf("User ID: %d\n", userID)
+		return
 	}
+	fmt.Printf("User ID: %d\n", userID)
 
 	fmt.Print("\ndbAddPlayerToGame before stmt prep: ", time.Now())
 
-	stmt, err := db.Prepare("INSERT INTO \"" + id + "\"(UsernameID, Captain, Team) VALUES (?, ?, ?)")
+	query := fmt.Sprintf(`
+        INSERT INTO "%s" (UsernameID, Captain, Team)
+        VALUES ($1, $2, $3)
+    `, tableName)
+
+	stmt, err := db.Prepare(query)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer stmt.Close()
-	fmt.Print("\ndbAddPlayerToGame after stmt close: ", time.Now())
+
+	fmt.Print("\ndbAddPlayerToGame after stmt prep: ", time.Now())
+
 	res, err := stmt.Exec(userID, 0, 0)
 	if err != nil {
-		//panic(err)
-		fmt.Println("\n", err)
+		log.Println("\n", err)
+		return
 	}
+
 	fmt.Print("\ndbAddPlayerToGame after stmt exec: ", time.Now())
 
 	rowCnt, err := res.RowsAffected()
 	if err != nil {
-		//panic(err)
-		fmt.Println("\n", err)
+		log.Println("\n", err)
+		return
 	}
-	fmt.Print("\ndbAddPlayerToGame after stmt rowsaffected: ", time.Now())
 
-	fmt.Printf("\naffected = %d", rowCnt)
+	fmt.Printf("\nRows affected = %d", rowCnt)
 	fmt.Print("\ndbAddPlayerToGame ending: ", time.Now())
 }
 
-func dbCreateGame(db *sql.DB, id string) {
-	stmt, err := db.Prepare("CREATE TABLE IF NOT EXISTS \"" + id + "\" (UsernameID INTEGER NOT NULL UNIQUE, Captain INTEGER NOT NULL, Team INTEGER NOT NULL, PRIMARY KEY(UsernameID), FOREIGN KEY(UsernameID) REFERENCES Users(ID));")
+func dbCreateGame(db *sql.DB, tableName string) {
+
+	query := fmt.Sprintf(`
+        CREATE TABLE IF NOT EXISTS "%s" (
+            UsernameID INTEGER NOT NULL UNIQUE,
+            Captain INTEGER NOT NULL,
+            Team INTEGER NOT NULL,
+            PRIMARY KEY (UsernameID),
+            FOREIGN KEY (UsernameID) REFERENCES "Users" ("ID")
+        );
+    `, tableName)
+
+	stmt, err := db.Prepare(query)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	defer stmt.Close()
 
 	res, err := stmt.Exec()
@@ -592,169 +589,209 @@ func dbCreateGame(db *sql.DB, id string) {
 		log.Fatal(err)
 	}
 
-	log.Print(res)
+	log.Println(res)
 }
 
 func dbCheckGame(db *sql.DB, gameId string) bool {
-	row := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?;", gameId)
+
+	query := `
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = $1;
+    `
 
 	var count int
-
-	if err := row.Scan(&count); err != nil {
+	err := db.QueryRow(query, gameId).Scan(&count)
+	if err != nil {
 		log.Fatal(err)
 	}
 
-	if count > 0 {
-		return true
-	}
-
-	return false
-
+	return count > 0
 }
 
 func dbCheckPlayerInGameForSessionData(db *sql.DB, username string) (int, string) {
-	row := db.QueryRow("SELECT InGame, GameId FROM Users WHERE Username = ? AND InGame = 1", username)
+
+	query := `
+        SELECT "InGame", "GameId"
+        FROM "Users"
+        WHERE UPPER("Username") = UPPER($1) AND "InGame" = true
+    `
 
 	var (
 		InGame int
 		GameId string
 	)
 
-	if err := row.Scan(&InGame, &GameId); err != nil {
+	row := db.QueryRow(query, username)
+
+	err := row.Scan(&InGame, &GameId)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			return 0, ""
 		}
-
+		log.Println("Error querying player session data:", err)
 		return 0, ""
 	}
 
 	return InGame, GameId
 }
 
-func dbCheckPlayerInGame(db *sql.DB, id string, username string) bool {
-	userId, err := dbGetUseridFromUsername(db, username)
+func dbCheckPlayerInGame(db *sql.DB, tableName string, username string) bool {
+	// Fetch the user ID based on the username
+	userID, err := dbGetUseridFromUsername(db, username)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to get userID: %v", err)
 	}
 
-	var count int
+	// Construct the SQL query string
+	query := fmt.Sprintf(`
+		SELECT COUNT(*)
+		FROM "%s"
+		WHERE UsernameID = $1
+	`, tableName)
 
-	row := db.QueryRow("SELECT COUNT(*) FROM '"+id+"' WHERE UsernameID = ?", userId)
+	fmt.Printf("Executing query: %s with userID: %d\n", query, userID)
 
-	if err := row.Scan(&count); err != nil {
-		log.Fatal(err)
-	}
-
-	if count != 1 {
-		return false
-	} else {
-		return true
-	}
-}
-
-func dbQueueCount(db *sql.DB) int {
-	rows, err := db.Query("SELECT COUNT(*) FROM Users WHERE InQueue == 1")
+	// Execute the query
+	rows, err := db.Query(query, userID)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Query failed: %v", err)
 	}
 	defer rows.Close()
 
+	// Extract the count from the result set
 	var count int
-
-	for rows.Next() {
+	if rows.Next() {
 		if err := rows.Scan(&count); err != nil {
-			log.Fatal(err)
+			log.Fatalf("Failed to scan result: %v", err)
 		}
+	}
+
+	// Check for any errors encountered during iteration
+	if err := rows.Err(); err != nil {
+		log.Fatalf("Row iteration failed: %v", err)
+	}
+
+	// Return true if exactly one record was found
+	return count == 1
+}
+
+func dbQueueCount(db *sql.DB) int {
+
+	query := `SELECT COUNT(*) FROM "Users" WHERE "InQueue" = true`
+
+	var count int
+	err := db.QueryRow(query).Scan(&count)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	return count
 }
 
 func dbUserSignup(db *sql.DB, username string, hashedPassword string, salt []byte) error {
-	stmt, err := db.Prepare(`INSERT INTO Users(Username, HashedPassword, Salt) VALUES (?, ?, ?)`)
+
+	stmt, err := db.Prepare(`INSERT INTO "Users" ("Username", "HashedPassword", "Salt") VALUES ($1, $2, $3)`)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer stmt.Close()
+
 	_, err = stmt.Exec(username, hashedPassword, salt)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	return nil
 }
 
-func dbSetQueueOff(db *sql.DB, username string) {
-	stmt, err := db.Prepare("UPDATE Users SET InQueue = 0 WHERE UPPER(Username) = UPPER(?)")
+func dbSetQueueOff(db *sql.DB, username string) error {
+
+	stmt, err := db.Prepare(`UPDATE "Users" SET "InQueue" = false WHERE UPPER("Username") = UPPER($1)`)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer stmt.Close()
+
 	_, err = stmt.Exec(username)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
 }
 
-func dbInGame(db *sql.DB, username string, gameId string) {
-	stmt, err := db.Prepare("UPDATE Users SET InQueue = 0, InGame = 1, GameId = ? WHERE UPPER(Username) = UPPER(?)")
+func dbInGame(db *sql.DB, username string, gameId string) error {
+
+	stmt, err := db.Prepare(`UPDATE "Users" 
+                             SET "InQueue" = false, "InGame" = true, "GameId" = $1 
+                             WHERE UPPER("Username") = UPPER($2)`)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer stmt.Close()
+
 	_, err = stmt.Exec(gameId, username)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
 }
 
 func dbCountHowManyReady(db *sql.DB, gameId string) int {
-	row := db.QueryRow("SELECT COUNT(*) FROM Users WHERE InGame = 1 AND gameId = ?", gameId)
+
+	query := `SELECT COUNT(*) FROM "Users" WHERE "InGame" = true AND "GameId" = $1`
 
 	var count int
-
-	if err := row.Scan(&count); err != nil {
-		log.Fatal(err)
+	err := db.QueryRow(query, gameId).Scan(&count)
+	if err != nil {
+		fmt.Println("error with CountHowManyReady")
 	}
 
 	return count
 }
 
-func dbResetQueueAndGame(db *sql.DB) {
-	stmt, err := db.Prepare("UPDATE Users SET InGame = 0, GameId = NULL, InQueue = 0")
+func dbResetQueueAndGame(db *sql.DB) error {
+
+	stmt, err := db.Prepare(`UPDATE "Users" 
+                             SET "InGame" = false, "GameId" = NULL, "InQueue" = false`)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer stmt.Close()
 
 	_, err = stmt.Exec()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
 }
 
 func dbRemoveGame(db *sql.DB, id string) error {
-	// Prepare the UPDATE statement
-	stmt, err := db.Prepare("UPDATE Users SET InGame = 0, GameId = NULL WHERE Users.ID IN (SELECT UsernameID FROM '" + id + "');")
+
+	updateQuery := fmt.Sprintf(`UPDATE "Users" 
+                                SET "InGame" = false, "GameId" = NULL 
+                                WHERE "ID" IN (SELECT UsernameID FROM "%s");`, id)
+	stmt, err := db.Prepare(updateQuery)
 	if err != nil {
 		return fmt.Errorf("failed to prepare UPDATE statement: %w", err)
 	}
 	defer stmt.Close()
 
-	// Execute the UPDATE statement
 	_, err = stmt.Exec()
 	if err != nil {
 		return fmt.Errorf("failed to execute UPDATE statement: %w", err)
 	}
 
-	// Prepare the DROP TABLE statement
-	stmt2, err := db.Prepare("DROP TABLE IF EXISTS '" + id + "';")
+	dropQuery := fmt.Sprintf(`DROP TABLE IF EXISTS "%s";`, id)
+	stmt2, err := db.Prepare(dropQuery)
 	if err != nil {
 		return fmt.Errorf("failed to prepare DROP TABLE statement: %w", err)
 	}
 	defer stmt2.Close()
 
-	// Execute the DROP TABLE statement
 	_, err = stmt2.Exec()
 	if err != nil {
 		return fmt.Errorf("failed to execute DROP TABLE statement: %w", err)
@@ -768,17 +805,37 @@ func dbTest(db *sql.DB) {
 	dbCreateGame(db, "test1")
 }
 
-func dbTestQueueOn(db *sql.DB) {
-	stmt, err := db.Prepare("UPDATE Users SET InQueue = 1")
+func dbTestQueueOn(db *sql.DB) error {
+
+	stmt, err := db.Prepare("UPDATE \"Users\" SET \"InQueue\" = true")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer stmt.Close()
 
 	_, err = stmt.Exec()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
+}
+
+func dbGetUserCredentials(db *sql.DB, username string) (string, []byte, error) {
+	var storedHash string
+	var salt []byte
+
+	query := `SELECT "HashedPassword", "Salt" FROM "Users" WHERE "Username" = $1`
+
+	err := db.QueryRow(query, username).Scan(&storedHash, &salt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil, nil
+		}
+		return "", nil, fmt.Errorf("failed to get user credentials: %w", err)
+	}
+
+	return storedHash, salt, nil
 }
 
 func countAccepted(slice []queuePlayers) int {
@@ -789,6 +846,13 @@ func countAccepted(slice []queuePlayers) int {
 		}
 	}
 	return count
+}
+
+func setSessionDataOfInGameOff(username string) {
+	sessionID := usernameToSessionID[username]
+	sessionData := getSession(sessionID)
+	sessionData["inGame"] = 0
+	sessionData["gameId"] = ""
 }
 
 func checkForQueueSlicePlayers(allQueues []gameQueue, playersSlice []queuePlayers) int {
@@ -954,7 +1018,7 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storedHash, salt, err := getUserCredentials(db, data.Username)
+	storedHash, salt, err := dbGetUserCredentials(db, data.Username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "Invalid username or password", http.StatusUnauthorized)
@@ -974,6 +1038,7 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Context().Value("session_id").(string)
 	sessionData := getSession(sessionID)
 	sessionData["username"] = data.Username
+	usernameToSessionID[data.Username] = sessionID
 	inGame, gameId := dbCheckPlayerInGameForSessionData(db, data.Username)
 	sessionData["inGame"] = inGame
 	sessionData["gameId"] = gameId
@@ -985,8 +1050,9 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	sessionStore = make(map[string]map[string]interface{})
-	sessionTTL   = 30 * time.Minute
+	sessionStore        = make(map[string]map[string]interface{})
+	usernameToSessionID = make(map[string]string)
+	sessionTTL          = 30 * time.Minute
 )
 
 func generateSessionID() string {
@@ -1013,20 +1079,6 @@ func setSession(sessionID string, data map[string]interface{}) {
 
 func deleteSession(sessionID string) {
 	delete(sessionStore, sessionID)
-}
-
-func getUserCredentials(db *sql.DB, username string) (string, []byte, error) {
-
-	var storedHash string
-	var salt []byte
-
-	query := `SELECT HashedPassword, Salt FROM Users WHERE Username = ?`
-	err := db.QueryRow(query, username).Scan(&storedHash, &salt)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return storedHash, salt, nil
 }
 
 func broadcastUpdateLobby(gameId string, lobby []Lobby) {
@@ -1311,9 +1363,19 @@ func hashPassword(password string, salt []byte) string {
 	return base64.StdEncoding.EncodeToString(append(salt, hashed[:]...))
 }
 
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Be sure to add proper checks in production
+	},
+}
+
 type PlayerActive struct {
-	Username   string
-	LastActive time.Time
+	conn     *websocket.Conn
+	username string
+	lastPing time.Time
+	mu       sync.Mutex
 }
 
 type mapSide struct {
@@ -1331,38 +1393,104 @@ var (
 	mu       sync.Mutex
 )
 
-func heartbeatHandler(w http.ResponseWriter, r *http.Request) {
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
 	username := r.URL.Query().Get("username")
+	client := &PlayerActive{conn: conn, username: username, lastPing: time.Now()}
+
+	fmt.Println(username, "has joined the queue.")
 
 	mu.Lock()
-	if player, exists := players3[username]; exists {
-		player.LastActive = time.Now()
-	} else {
-		players3[username] = &PlayerActive{Username: username, LastActive: time.Now()}
-	}
+	players3[username] = client
 	mu.Unlock()
 
-	fmt.Fprintf(w, "Heartbeat received for %s", username)
+	go handleMessages(client)
 }
 
-func monitorQueue(db *sql.DB, slice []queuePlayers) {
-	for {
-		time.Sleep(10 * time.Second) // Check the queue every 10 seconds
+func handleMessages(client *PlayerActive) {
+	defer func() {
+		client.conn.Close()
+	}()
 
-		mu.Lock()
-		now := time.Now()
-		for username, player := range players3 {
-			if now.Sub(player.LastActive) > 15*time.Second { // If no heartbeat for 15 seconds
-				fmt.Printf("Player %s is no longer in the queue (last active: %s)\n", username, player.LastActive)
-				delete(players3, username)
-				index := findIndexByUsername(slice, username)
-				if index != -1 {
-					slice = append(slice[:index], slice[index+1:]...)
-				}
-				dbSetQueueOff(db, username)
+	for {
+		_, message, err := client.conn.ReadMessage()
+		if err != nil {
+			log.Printf("Error reading message: %v", err)
+			break
+		}
+
+		var msg Message
+		if err := json.Unmarshal(message, &msg); err != nil {
+			log.Printf("Error unmarshaling message: %v", err)
+			continue
+		}
+
+		if msg.Type == "ping" {
+			client.mu.Lock()
+			client.lastPing = time.Now()
+			client.mu.Unlock()
+
+			response := Message{Type: "pong", Payload: ""}
+			if err := client.conn.WriteJSON(response); err != nil {
+				log.Printf("Error sending pong: %v", err)
 			}
 		}
-		mu.Unlock()
+	}
+}
+
+func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
+	pingInterval := 10 * time.Second      // Interval for sending pings
+	inactivityTimeout := 15 * time.Second // Timeout for client inactivity
+	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-pingTicker.C:
+			// Send pings to all connected clients
+			mu.Lock()
+			for username, client := range players3 {
+				err := client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
+				if err != nil {
+					log.Printf("Error while sending ping to client %s: %v", username, err)
+					// Close and remove client on error
+					client.conn.Close()
+					delete(players3, username)
+					dbSetQueueOff(db, username)
+					index := findIndexByUsername(queuePlayersSlice, username)
+					if index != -1 {
+						queuePlayersSlice = append(queuePlayersSlice[:index], queuePlayersSlice[index+1:]...)
+					}
+					fmt.Println(queuePlayersSlice)
+				}
+			}
+			mu.Unlock()
+
+		case <-time.After(inactivityTimeout):
+			// Check for inactive clients
+			now := time.Now()
+			mu.Lock()
+			for username, client := range players3 {
+				client.mu.Lock()
+				if now.Sub(client.lastPing) > inactivityTimeout {
+					log.Printf("Client %s inactive. Removing from queue.", username)
+					client.conn.Close()
+					delete(players3, username)
+					dbSetQueueOff(db, username)
+					index := findIndexByUsername(queuePlayersSlice, username)
+					if index != -1 {
+						queuePlayersSlice = append(queuePlayersSlice[:index], queuePlayersSlice[index+1:]...)
+					}
+				}
+				client.mu.Unlock()
+			}
+			mu.Unlock()
+		}
 	}
 }
 
@@ -1370,13 +1498,16 @@ func main() {
 
 	ADDR := os.Getenv("ADDR")
 	PORT := os.Getenv("PORT")
-	SQLPATH := os.Getenv("SQLPATH")
+	connStr := os.Getenv("SQLPATH")
 
-	if SQLPATH == "" {
-		SQLPATH = "/data/maindb.db" // Default path if SQLPATH is not set
+	if connStr == "" {
+		connStr = "user=postgres password=postgres dbname=postgres sslmode=disable"
 	}
 
-	db, err := sql.Open("sqlite", "maindb.db")
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if err != nil {
 		log.Fatal(err)
@@ -1385,40 +1516,43 @@ func main() {
 	defer db.Close()
 
 	dbCheckUsersTable(db)
-
-	err2 := dbRemoveGame(db, "test1")
-	if err2 != nil {
-		log.Printf("Failed to remove game: %v", err)
-	}
-	log.Println("before resetqueue and game")
 	dbResetQueueAndGame(db)
-	log.Println("after resetqueue and game")
-	dbTest(db)
-	log.Println("after test")
 
-	//dbSetQueueOff(db, "imaple2")
-	//dbSetQueueOff(db, "")
-	//dbSetQueueOff(db, "Rjhanh")
-	dbSetQueueOff(db, "Ria")
-	dbSetQueueOff(db, "iMaple")
-	dbSetQueueOff(db, "allie2")
-	dbSetQueueOff(db, "Allie")
-	dbSetQueueOff(db, "rayyan2")
-	dbSetQueueOff(db, "rayyan")
+	/*
+		err2 := dbRemoveGame(db, "test1")
+		if err2 != nil {
+			log.Printf("Failed to remove game: %v", err)
+		}
+		dbTest(db)
+
+
+
+		//dbSetQueueOff(db, "imaple2")
+		//dbSetQueueOff(db, "")
+		//dbSetQueueOff(db, "Rjhanh")
+		dbSetQueueOff(db, "Ria")
+		dbSetQueueOff(db, "iMaple")
+		dbSetQueueOff(db, "allie2")
+		dbSetQueueOff(db, "Allie")
+		dbSetQueueOff(db, "rayyan2")
+		dbSetQueueOff(db, "rayyan")
+	*/
 
 	queuePlayersSlice := make([]queuePlayers, 0, 10)
 	//queuePlayers = append(queuePlayers, "MistaDong", "iMaple", "Allie", "Ria", "Chi", "TenZ", "Vincent", "Jordan", "Evan")
-	queuePlayersSlice = append(queuePlayersSlice,
-		queuePlayers{username: "MistaDong", accepted: 1},
-		queuePlayers{username: "iMaple", accepted: 1},
-		//queuePlayers{username: "Allie", accepted: 1},
-		queuePlayers{username: "Ria", accepted: 1},
-		queuePlayers{username: "Chi", accepted: 1},
-		queuePlayers{username: "TenZ", accepted: 1},
-		queuePlayers{username: "Vincent", accepted: 1},
-		queuePlayers{username: "Jordan", accepted: 1},
-		queuePlayers{username: "Evan", accepted: 1},
-	)
+	/*
+		queuePlayersSlice = append(queuePlayersSlice,
+			queuePlayers{username: "MistaDong", accepted: 1},
+			queuePlayers{username: "iMaple", accepted: 1},
+			//queuePlayers{username: "Allie", accepted: 1},
+			queuePlayers{username: "Ria", accepted: 1},
+			queuePlayers{username: "Chi", accepted: 1},
+			queuePlayers{username: "TenZ", accepted: 1},
+			queuePlayers{username: "Vincent", accepted: 1},
+			queuePlayers{username: "Jordan", accepted: 1},
+			queuePlayers{username: "Evan", accepted: 1},
+		)
+	*/
 
 	allQueues := make([]gameQueue, 0, 10)
 	allGames := make([]gamePlayers, 0, 10)
@@ -1458,8 +1592,8 @@ func main() {
 	mux.Handle("/", http.FileServer(http.Dir("./FrontEnd/build")))
 	mux.Handle("/login/", http.StripPrefix("/login/", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir("./FrontEnd/build"))))
-	mux.HandleFunc("/heartbeat", heartbeatHandler)
-	go monitorQueue(db, queuePlayersSlice)
+	mux.HandleFunc("/heartbeat", handleWebSocket)
+	go monitorClients(db, queuePlayersSlice)
 	//DEBUG PPROF
 	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
 	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
@@ -1988,15 +2122,17 @@ func main() {
 			json.NewEncoder(w).Encode("received :333")
 		} else {
 			dbAddAllPlayersToGame(db, u.Id)
-			dbAddPlayerToGame(db, u.Id, "MistaDong")
-			dbAddPlayerToGame(db, u.Id, "TenZ")
-			dbAddPlayerToGame(db, u.Id, "Ria")
-			dbAddPlayerToGame(db, u.Id, "Vincent")
-			dbAddPlayerToGame(db, u.Id, "Jordan")
-			dbAddPlayerToGame(db, u.Id, "iMaple")
-			dbAddPlayerToGame(db, u.Id, "Chi")
-			dbAddPlayerToGame(db, u.Id, "Evan")
-			dbSetCaptainsForTestPurposes(db, u.Id, "rayyan2", "allie2")
+			/*
+				dbAddPlayerToGame(db, u.Id, "MistaDong")
+				dbAddPlayerToGame(db, u.Id, "TenZ")
+				dbAddPlayerToGame(db, u.Id, "Ria")
+				dbAddPlayerToGame(db, u.Id, "Vincent")
+				dbAddPlayerToGame(db, u.Id, "Jordan")
+				dbAddPlayerToGame(db, u.Id, "iMaple")
+				dbAddPlayerToGame(db, u.Id, "Chi")
+				dbAddPlayerToGame(db, u.Id, "Evan")
+				dbSetCaptainsForTestPurposes(db, u.Id, "rayyan2", "allie2")
+			*/
 			json.NewEncoder(w).Encode("received :3333")
 		}
 
@@ -2086,7 +2222,7 @@ func main() {
 				json.NewEncoder(w).Encode("REDIRECT REQUEST TIMED OUT")
 				return
 			case <-ticker.C:
-				if dbCountHowManyReady(db, ug.Id) == 2 {
+				if dbCountHowManyReady(db, ug.Id) == 10 {
 					sessionData["inGame"] = 1
 					sessionData["gameId"] = ug.Id
 					i := findIndexByUsername(queuePlayersSlice, ug.Username)
@@ -2290,7 +2426,6 @@ func main() {
 	}
 
 	log.Printf("Starting server on %s:%s", ADDR, PORT)
-	log.Printf("Using SQLite database at: %s", SQLPATH)
 
 	fmt.Println(ADDR + ":" + PORT)
 	http.ListenAndServe(ADDR+":"+PORT, mux)

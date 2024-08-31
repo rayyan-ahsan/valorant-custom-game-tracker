@@ -44,16 +44,10 @@ COPY --from=go-builder /app/main .
 # Copy the built React assets from the frontend build stage
 COPY --from=frontend-builder /FrontEnd/build ./FrontEnd/build
 
-# Create a directory for the SQLite database
-RUN mkdir /data
-
-# Copy the pre-existing database file (if it exists)
-COPY maindb.db /data/maindb.db
-
 # Set environment variables
 ENV ADDR=0.0.0.0
 ENV PORT=8080
-ENV SQLPATH=/data/maindb.db
+ENV SQLPATH="host=host.docker.internal user=postgres password=postgres dbname=postgres sslmode=disable"
 
 # Expose the port your app will run on
 EXPOSE 8080
