@@ -1,6 +1,6 @@
 module github.com/rayyan-ahsan/valorant-custom-game-tracker
 
-go 1.22.5
+go 1.22
 
 require (
 	github.com/bytedance/sonic v1.12.0 // indirect
