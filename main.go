@@ -22,56 +22,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-/*
-func main() {
-	r := gin.Default()
-	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "pong",
-		})
-	})
-	r.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "hi",
-		})
-	})
-
-	r.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "test",
-		})
-	})
-
-	r.Run() // listen and serve on localhost:8080
-}
-*/
-
-/*
-func main() {
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", "----", nil)
-	req.Header.Set("TRN-Api-Key", "----")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Encoding", "gzip")
-
-	resp, _ := client.Do(req)
-
-	if err != nil {
-		log.Printf("Request Failed: %s", err)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Reading body failed: %s", err)
-		return
-	}
-	// Log the request body
-	bodyString := string(body)
-	log.Print(bodyString)
-}
-*/
-
 type SignupData struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
