@@ -1378,6 +1378,8 @@ func monitorQueue(db *sql.DB, slice []queuePlayers) {
 
 func main() {
 
+	PORT := os.Getenv("PORT")
+
 	db, err := sql.Open("sqlite", "maindb.db")
 
 	if err != nil {
@@ -2279,5 +2281,6 @@ func main() {
 		ctx := r.Context
 		<-ctx().Done()
 	}))
-	http.ListenAndServe(":3000", mux)
+
+	http.ListenAndServe(":"+PORT, mux)
 }
