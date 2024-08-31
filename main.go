@@ -19,6 +19,7 @@ import (
 
 	"net/http/pprof"
 
+	"cloud.google.com/go/cloudsqlconn"
 	"github.com/gorilla/websocket"
 	_ "github.com/lib/pq"
 )
@@ -1496,19 +1497,29 @@ func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
 
 func main() {
 
+	ctx := context.Background()
+
 	ADDR := os.Getenv("ADDR")
 	PORT := os.Getenv("PORT")
 	connStr := os.Getenv("SQLPATH")
+	GCINSTANCE := os.Getenv("GCINSTANCE")
 
 	if connStr == "" {
 		connStr = "user=postgres password=postgres dbname=postgres sslmode=disable"
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	conn, err := cloudsqlconn.NewDialer(ctx)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println("no google connection")
+	}
+	defer conn.Close()
+
+	dbURI := fmt.Sprintf("postgres://%s?host=%s", connStr, GCINSTANCE)
+	if GCINSTANCE == "" {
+		dbURI = connStr
 	}
 
+	db, err := sql.Open("postgres", dbURI)
 	if err != nil {
 		log.Fatal(err)
 	}

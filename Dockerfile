@@ -48,6 +48,7 @@ COPY --from=frontend-builder /FrontEnd/build ./FrontEnd/build
 ENV ADDR=0.0.0.0
 ENV PORT=8080
 ENV SQLPATH="host=host.docker.internal user=postgres password=postgres dbname=postgres sslmode=disable"
+ENV GCINSTANCE=""
 
 # Expose the port your app will run on
 EXPOSE 8080
