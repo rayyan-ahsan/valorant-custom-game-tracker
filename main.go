@@ -1514,12 +1514,12 @@ func main() {
 	}
 	defer conn.Close()
 
-	dbURI := fmt.Sprintf("postgres://%s?host=%s", connStr, GCINSTANCE)
+	dsn := fmt.Sprintf("user=your_user password=your_password dbname=your_db sslmode=disable host=/cloudsql/%s", GCINSTANCE)
 	if GCINSTANCE == "" {
-		dbURI = connStr
+		dsn = connStr
 	}
 
-	db, err := sql.Open("postgres", dbURI)
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
