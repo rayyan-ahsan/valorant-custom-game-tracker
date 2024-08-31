@@ -124,6 +124,25 @@
   transition: all 0.1s cubic-bezier(.77,0,.51,.98) !important;
 }
 
+.side-indicator {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 5px;
+  font-weight: bold;
+  z-index: 30;
+}
+
+.side-indicator.left {
+  left: 0;
+}
+
+.side-indicator.right {
+  right: 0;
+}
+
 .map-container.disabled .map-image{
   cursor: not-allowed;
   transform: scale(1)!important;

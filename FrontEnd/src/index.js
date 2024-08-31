@@ -17,6 +17,8 @@ import Navigationbar from './Navigationbar';
 import GamePage from './GamePage';
 import SignupPage from './SignupPage';
 import BOPollVote from './BestOfSeriesPoll';
+import SideSelectModal from './SideSelectChoice';
+import CoinFlip from './CoinFlipPage';
 
 const router = createBrowserRouter([
   {
@@ -73,6 +75,18 @@ const router = createBrowserRouter([
     </div>
     <div className="Login-form-bg">
         <div style={{padding: "10px"}}>Work in progress sorry :3</div>
+    </div>
+    </div>
+  },
+  {
+    path: "/testcoinflip",
+    element:
+    <div>
+    <div className="App">
+    <Navigationbar/>
+    </div>
+    <div className="Login-form-bg">
+        <CoinFlip></CoinFlip>
     </div>
     </div>
   },

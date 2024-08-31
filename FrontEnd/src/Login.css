@@ -1,0 +1,24 @@
+.Login-form{
+  padding: 0% 35%;
+  display: flex;
+  height: 80dvh;
+  width: 100%;
+  justify-content: center;
+  align-items: stretch;
+  flex-direction: column;
+  flex-wrap: wrap;
+  align-content: stretch;
+}
+
+.Alert-placeholder {
+  height: 60px; /* Fixed height for the alert */
+  width: 100%; /* Ensure the alert spans the full width */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.Vertical-center{
+  padding: 5%
+}

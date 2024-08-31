@@ -79,6 +79,9 @@ function MatchFound({ show, handleClose, username, gameId }) {
   useEffect(() => {
     let timerId;
     if (show) {
+      if (audioRef.current) {
+        audioRef.current.volume = 0.5
+      }
       audioRef.current.play();
       setModalBody('🔲🔲🔲🔲🔲🔲🔲🔲🔲');
       timerId = setInterval(() => {

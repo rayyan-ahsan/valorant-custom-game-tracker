@@ -2,13 +2,89 @@ import { json } from 'react-router-dom';
 import './App.css';
 import './Login.css';
 import { useState, useEffect, useRef } from 'react';
-import ProgressBar from 'react-bootstrap/ProgressBar';
 import Button from 'react-bootstrap/Button';
 import Modal from 'react-bootstrap/Modal';
 import { AlertTriangle } from 'lucide-react';
 import BOPollVote from './BestOfSeriesPoll';
+import SideSelectModal from './SideSelectChoice';
+import { useNavigate } from 'react-router-dom';
 
+function AlertDismissibleExample({ show, handleClose, gameId, username }) {
 
+  return (
+    <Modal
+      show={show}
+      onHide={handleClose}
+      centered
+      size="md"
+    >
+      <Modal.Header className="bg-danger text-white border-bottom-0">
+        <Modal.Title className="d-flex align-items-center">
+          <AlertTriangle className="me-2" />
+          Are you sure?
+        </Modal.Title>
+      </Modal.Header>
+      <Modal.Body className="text-center py-4">
+        Leaving this game will cancel the game for everyone else.
+      </Modal.Body>
+      <Modal.Footer className="border-top-0 justify-content-center">
+      <Button variant="outline-danger" onClick={() => {
+        killLobby(gameId, username)
+        handleClose()}}>
+          Yes, I'm sure
+        </Button>
+        <Button variant="outline-success" onClick={handleClose}>
+          No, I don't want to leave.
+        </Button>
+      </Modal.Footer>
+    </Modal>
+  );
+}
+
+function KillAlert({ show, message, navigate }) {
+
+  return (
+    <Modal
+      show={show}
+      centered
+      size="md"
+    >
+      <Modal.Header className="bg-danger text-white border-bottom-0">
+        <Modal.Title className="d-flex align-items-center">
+          <AlertTriangle className="me-2" />
+          Game Cancelled
+        </Modal.Title>
+      </Modal.Header>
+      <Modal.Body className="text-center py-4">
+        {message}
+      </Modal.Body>
+      <Modal.Footer className="border-top-0 justify-content-center">
+        <Button variant="outline-success" onClick={() => {navigate("/")}}>
+          Okay
+        </Button>
+      </Modal.Footer>
+    </Modal>
+  );
+}
+
+function killLobby(gameId, username){
+  fetch(`/api/killlobby`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: 'include',
+    body: JSON.stringify({
+      "gameId": gameId,
+      "username": username,
+    })
+  })
+  .then((res) => res.json())
+  .then((data) => {
+    console.log("lobby died", data)
+  })
+  .catch((err) => {
+    console.log("kill Lobby err:", err)
+  })
+}
 
 //const initialPlayers = [['rayyan',0,0], ['MistaDong',0,0], ['iMaple',0,0], ['Allie',0,0], ['Ria',0,0], ['Chi',0,0], ['TenZ',0,0], ['Vincent',0,0], ['Jordan',0,0], ['Evan',0,0]];
 const initialMaps = [['Abyss', 0, 0] , ['Ascent',0,0], ['Bind',0,0], ['Haven',0,0], ['Icebox',0,0], ['Lotus',0,0], ['Sunset',0,0]];
@@ -24,16 +100,32 @@ function GamePage() {
   const [mapList, setMapList] = useState(initialMaps);
   const [mapPhase, setMapPhase] = useState('ban');
   const [currentUser, setCurrentUser] = useState(null);
-  const [username, setUsername] = useState(null)
+  const [username, setUsername] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [show, setShow] = useState(false)
   const [finalResult, setFinalResult] = useState(null)
   const [matchFormat, setMatchFormat] = useState(null)
   const [movingMap, setMovingMap] = useState(null)
+  const [mapSides, setMapSides] = useState({});
+  const [sideMap, setSideMap] = useState(null)
+  const [meTeamBoyo, setMeTeamBoyo] = useState(null)
+  const [showSideSelect, setShowSideSelect] = useState(false)
+  const [showAlert, setShowAlert] = useState(false)
+  const [showKillAlert, setShowKillAlert] = useState(false)
+  const [killMessage, setKillMessage] = useState("Lobby has been cancelled.")
   const gameId = window.location.href.toString().slice(-5)
   const lastClickTime = useRef(0);
 
+  const handleCloseAlert = () => setShowAlert(false)
+  const handleShowAlert = () => {
+    setShowAlert(true)
+  }
+
+  const navigate = useNavigate();
+
   const handleClose = () => setShow(false);
+  const currentUserRef = useRef(null);
+  const currentMapListRef = useRef(null)
   
   /*
   const liveTeamView = new EventSource(`/api/liveteamview?gameId=${gameId}`)
@@ -134,6 +226,14 @@ function GamePage() {
   }, [finalResult, gameId])
 
   useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  useEffect(() => {
+    currentMapListRef.current = mapList;
+  }, [mapList]);
+
+  useEffect(() => {
 
     console.log("liveteamview opened")
     const liveTeamView = new EventSource(`/api/liveteamview?gameId=${gameId}`);
@@ -142,26 +242,49 @@ function GamePage() {
       const message = JSON.parse(event.data);
       console.log("new players :33333 :", event.data)
       setPlayers(message.map(d => [d.Username, d.Captain, d.Team]));
-
+      const currentUserData = players.find(player => player[0] === username);
+      if(currentUserData){
+        setCurrentUser(currentUserData);
+      }
     });
+
+    liveTeamView.addEventListener('kill', (event) => {
+      const message = JSON.parse(event.data);
+      setKillMessage(message)
+      setShowKillAlert(true)
+    })
 
     liveTeamView.addEventListener('mapList', (event) => {
       const maps = JSON.parse(event.data);
       console.log("received maps uwu:", maps)
+      const previousMapList = currentMapListRef.current
+      const newMapList = maps.map(m => [m.Name, m.Team, m.Action])
+      const newPickedMaps = newMapList.filter(map => {
+        const previousMap = previousMapList.find(prevMap => prevMap[0] === map[0]);
+        return previousMap && previousMap[2] === 0 && map[2] === 1 && map[1] !== currentUserRef.current[2];
+    });
       setMapList(maps.map(m => [m.Name, m.Team, m.Action]))
+      const allPlayersAssigned = players.every(player => player[2] !== 0 && player[2] !== null);
+      if(isUserCaptain && allPlayersAssigned && newPickedMaps.length > 0 && (newPickedMaps[0][1] !== currentUserRef.current[2])) {
+        console.log("its me hehehe")
+        setSideMap(newPickedMaps[0][0])
+        setMeTeamBoyo(currentUserRef.current[2])
+        console.log("showSideSelect :3", showSideSelect)
+        setShowSideSelect(true)
+      }
     });
 
     liveTeamView.addEventListener('currentTeam', (event) => {
       const currentTeam = JSON.parse(event.data)
       console.log("new team or something", event.data)
-      if(currentTeam.length == 1) {
+      if(currentTeam.length === 1) {
         var newTeam = Number(currentTeam)
       } else {
-        if(currentTeam.substr(0,1) == "p"){
+        if(currentTeam.substr(0,1) === "p"){
           setMapPhase("pick")
-        } else if(currentTeam.substr(0,1) == "b"){
+        } else if(currentTeam.substr(0,1) === "b"){
           setMapPhase("ban")
-        } else if(currentTeam.substr(0,1) == 'd'){
+        } else if(currentTeam.substr(0,1) === 'd'){
           setMapPhase("done")
         }
         newTeam = Number(currentTeam.substr(currentTeam.length - 1))
@@ -183,6 +306,17 @@ function GamePage() {
       }
     })
 
+    liveTeamView.addEventListener('mapsides', (event) => {
+      const message = JSON.parse(event.data);
+      const newMapSides = {};
+      for (let i = 0; i < message.length; i++) {
+        const { MapName, AttackerTeam } = message[i];
+        newMapSides[MapName] = AttackerTeam;
+      }
+      setMapSides(newMapSides);
+      console.log(mapSides)
+    });
+
     liveTeamView.addEventListener('error', (error) => {
       console.log("An error occurred: ", error);
     });
@@ -196,10 +330,15 @@ function GamePage() {
   }, [gameId]);
 
   useEffect(() => {
+    console.log("username is: ", username)
     if(username) {
       assignCaptains();
     }
   }, [username])
+
+  useEffect(() => {
+    console.log("changed userdata is: ", currentUser)
+  }, [currentUser])
 
   const determineNextTeam = () => {
     const team1 = countPlayersInTeam(1);
@@ -383,6 +522,9 @@ function GamePage() {
                 .filter(map => map[1] === teamNumber && map[2] === 1)
                 .map((map, index) => (
                   <div key={index} className="map-container picked">
+                    <div className="side-indicator left">
+                  {mapSides[map[0]] === 1 ? 'A' : 'D'}
+                </div>
                     <div
                       className="map-image"
                       style={{
@@ -393,6 +535,9 @@ function GamePage() {
                     <div className="map-text">
                       {map[0]}
                     </div>
+                    <div className="side-indicator right">
+                  {mapSides[map[0]] === 2 ? 'A' : 'D'}
+                </div>
                   </div>
                 ))}
             </div>
@@ -583,6 +728,9 @@ function GamePage() {
                     key={map[0]}
                     className="map-container picked"
                 >
+                  <div className="side-indicator left">
+                  {mapSides[map[0]] === 1 ? 'A' : 'D'}
+                </div>
                   <div
                       className='map-image'
                       style={{
@@ -593,6 +741,9 @@ function GamePage() {
                   <div
                       className='map-text'
                   >{map[0]}</div>
+                  <div className="side-indicator right">
+                  {mapSides[map[0]] === 2 ? 'A' : 'D'}
+                </div>
                 </div>
 
                 ))
@@ -630,6 +781,7 @@ function GamePage() {
   }
 
   return (
+    <>
     <div className="game-page">
       <BOPollVote
       show={show} 
@@ -645,6 +797,13 @@ function GamePage() {
       gameId = {gameId}
       setFinalResult={setFinalResult}
       />
+      <SideSelectModal
+      show={showSideSelect}
+      setShow={setShowSideSelect}
+      gameId={gameId}
+      team={meTeamBoyo}
+      mapName={sideMap}
+      />
       {renderTeam(1)}
       <div className="player-list">
         <h3>
@@ -658,6 +817,12 @@ function GamePage() {
       </div>
       {renderTeam(2)}
     </div>
+    <div className='justify-content-center fixed-bottom hehe'>
+    <Button className="btn-danger nav-item btnSideSelect btnLeaveGame justify-content-center" onClick={() => {setShowAlert(true)}}>Leave Game</Button>
+    <AlertDismissibleExample show={showAlert} handleClose={handleCloseAlert} gameId={gameId} username={username} />
+    <KillAlert show={showKillAlert} message={killMessage} navigate={navigate}></KillAlert>
+    </div>
+    </>
   );
 }
 
