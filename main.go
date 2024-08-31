@@ -1514,7 +1514,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	dsn := fmt.Sprintf("user=your_user password=your_password dbname=your_db sslmode=disable host=/cloudsql/%s", GCINSTANCE)
+	dsn := fmt.Sprintf(connStr+" host=/cloudsql/%s", GCINSTANCE)
 	if GCINSTANCE == "" {
 		dsn = connStr
 	}
