@@ -324,6 +324,46 @@ func dbRead(db *sql.DB) {
 	}
 }
 
+func dbCheckUsersTable(db *sql.DB) {
+	query := `
+		SELECT name 
+		FROM sqlite_master 
+		WHERE type='table' AND name='Users';`
+
+	var tableName string
+	err := db.QueryRow(query).Scan(&tableName)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Table does not exist, create it
+			createTableQuery := `
+			CREATE TABLE "Users" (
+				"ID" INTEGER NOT NULL UNIQUE,
+				"Username" TEXT NOT NULL UNIQUE,
+				"HashedPassword" TEXT NOT NULL,
+				"Salt" BLOB NOT NULL,
+				"InQueue" INTEGER NOT NULL DEFAULT 0,
+				"InGame" INTEGER NOT NULL DEFAULT 0,
+				"GameId" TEXT,
+				PRIMARY KEY("ID" AUTOINCREMENT),
+				CHECK(("InGame" = 0 AND "GameId" IS NULL) OR ("InGame" = 1 AND "GameId" IS NOT NULL)),
+				CHECK(("InGame" = 0 AND "InQueue" = 0) OR ("InGame" = 1 AND "InQueue" = 0) OR ("InGame" = 0 AND "InQueue" = 1))
+			);`
+
+			_, err = db.Exec(createTableQuery)
+			if err != nil {
+				log.Fatalf("Failed to create Users table: %v", err)
+			}
+			fmt.Println("Users table created successfully.")
+		} else {
+			log.Fatalf("Failed to check if table exists: %v", err)
+		}
+	} else {
+		// Table exists
+		fmt.Println("Users table already exists.")
+	}
+}
+
 func dbSetInQueue(db *sql.DB, reactUsername string) error {
 	stmt, err := db.Prepare("UPDATE Users SET InQueue = 1 WHERE UPPER(Username) = Upper(\"" + reactUsername + "\")")
 	if err != nil {
@@ -1380,6 +1420,11 @@ func main() {
 
 	ADDR := os.Getenv("ADDR")
 	PORT := os.Getenv("PORT")
+	SQLPATH := os.Getenv("SQLPATH")
+
+	if SQLPATH == "" {
+		SQLPATH = "/data/maindb.db" // Default path if SQLPATH is not set
+	}
 
 	db, err := sql.Open("sqlite", "maindb.db")
 
@@ -1387,12 +1432,19 @@ func main() {
 		log.Fatal(err)
 	}
 
+	defer db.Close()
+
+	dbCheckUsersTable(db)
+
 	err2 := dbRemoveGame(db, "test1")
 	if err2 != nil {
 		log.Printf("Failed to remove game: %v", err)
 	}
+	log.Println("before resetqueue and game")
 	dbResetQueueAndGame(db)
+	log.Println("after resetqueue and game")
 	dbTest(db)
+	log.Println("after test")
 
 	//dbSetQueueOff(db, "imaple2")
 	//dbSetQueueOff(db, "")
@@ -2286,6 +2338,10 @@ func main() {
 	if PORT == "" {
 		PORT = "3000"
 	}
+
+	log.Printf("Starting server on %s:%s", ADDR, PORT)
+	log.Printf("Using SQLite database at: %s", SQLPATH)
+
 	fmt.Println(ADDR + ":" + PORT)
 	http.ListenAndServe(ADDR+":"+PORT, mux)
 }
