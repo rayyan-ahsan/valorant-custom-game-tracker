@@ -286,7 +286,7 @@ func dbCheckUsersTable(db *sql.DB) {
 	createTableQuery := `
     CREATE TABLE IF NOT EXISTS "Users" (
         "ID" SERIAL PRIMARY KEY,
-        "Username" TEXT NOT NULL UNIQUE,
+        "Username" TEXT NOT NULL,
         "HashedPassword" TEXT NOT NULL,
         "Salt" BYTEA NOT NULL,
         "InQueue" boolean NOT NULL DEFAULT false,
@@ -296,11 +296,20 @@ func dbCheckUsersTable(db *sql.DB) {
         CHECK(("InGame" = false AND "InQueue" = false) OR ("InGame" = true AND "InQueue" = false) OR ("InGame" = false AND "InQueue" = true))
     );`
 
+	createIndexQuery := `
+    CREATE UNIQUE INDEX IF NOT EXISTS "Users_Username_lower_key" ON "Users" (lower("Username"));`
+
 	_, err := db.Exec(createTableQuery)
 	if err != nil {
 		log.Fatalf("Failed to create Users table: %v", err)
 	}
 	fmt.Println("Users table is present or created successfully.")
+
+	_, err = db.Exec(createIndexQuery)
+	if err != nil {
+		log.Fatalf("Failed to create Unique Index for Username", err)
+	}
+	fmt.Println("Users table has the Unique constraint succesfully added")
 }
 
 func dbSetInQueue(db *sql.DB, reactUsername string) error {
@@ -610,31 +619,42 @@ func dbCheckGame(db *sql.DB, gameId string) bool {
 	return count > 0
 }
 
-func dbCheckPlayerInGameForSessionData(db *sql.DB, username string) (int, string) {
+func dbCheckPlayerForSessionData(db *sql.DB, username string) (int, int, string) {
 
 	query := `
-        SELECT "InGame", "GameId"
+        SELECT "InQueue", "InGame", "GameId"
         FROM "Users"
-        WHERE UPPER("Username") = UPPER($1) AND "InGame" = true
+        WHERE UPPER("Username") = UPPER($1)
     `
 
 	var (
-		InGame int
-		GameId string
+		InQueue bool
+		InGame  bool
+		GameId  []byte
 	)
 
 	row := db.QueryRow(query, username)
 
-	err := row.Scan(&InGame, &GameId)
+	err := row.Scan(&InQueue, &InGame, &GameId)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return 0, ""
+			return 0, 0, ""
 		}
 		log.Println("Error querying player session data:", err)
-		return 0, ""
+		return 0, 0, ""
+	}
+	InQueueInt := 0
+	InGameInt := 0
+
+	if InQueue {
+		InQueueInt = 1
 	}
 
-	return InGame, GameId
+	if InGame {
+		InGameInt = 1
+	}
+
+	return InQueueInt, InGameInt, string(GameId)
 }
 
 func dbCheckPlayerInGame(db *sql.DB, tableName string, username string) bool {
@@ -822,21 +842,22 @@ func dbTestQueueOn(db *sql.DB) error {
 	return nil
 }
 
-func dbGetUserCredentials(db *sql.DB, username string) (string, []byte, error) {
+func dbGetUserCredentials(db *sql.DB, username string) (string, string, []byte, error) {
+	var returnUsername string
 	var storedHash string
 	var salt []byte
 
-	query := `SELECT "HashedPassword", "Salt" FROM "Users" WHERE "Username" = $1`
+	query := `SELECT "Username", "HashedPassword", "Salt" FROM "Users" WHERE LOWER("Username") = LOWER($1)`
 
-	err := db.QueryRow(query, username).Scan(&storedHash, &salt)
+	err := db.QueryRow(query, username).Scan(&returnUsername, &storedHash, &salt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", nil, nil
+			return "", "", nil, nil
 		}
-		return "", nil, fmt.Errorf("failed to get user credentials: %w", err)
+		return "", "", nil, fmt.Errorf("failed to get user credentials: %w", err)
 	}
 
-	return storedHash, salt, nil
+	return returnUsername, storedHash, salt, nil
 }
 
 func countAccepted(slice []queuePlayers) int {
@@ -850,10 +871,12 @@ func countAccepted(slice []queuePlayers) int {
 }
 
 func setSessionDataOfInGameOff(username string) {
-	sessionID := usernameToSessionID[username]
-	sessionData := getSession(sessionID)
-	sessionData["inGame"] = 0
-	sessionData["gameId"] = ""
+	sessionID, exists := usernameToSessionID[username]
+	if exists {
+		sessionData := getSession(sessionID)
+		sessionData["inGame"] = 0
+		sessionData["gameId"] = ""
+	}
 }
 
 func checkForQueueSlicePlayers(allQueues []gameQueue, playersSlice []queuePlayers) int {
@@ -1019,7 +1042,7 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storedHash, salt, err := dbGetUserCredentials(db, data.Username)
+	Username, storedHash, salt, err := dbGetUserCredentials(db, data.Username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "Invalid username or password", http.StatusUnauthorized)
@@ -1038,11 +1061,12 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 
 	sessionID := r.Context().Value("session_id").(string)
 	sessionData := getSession(sessionID)
-	sessionData["username"] = data.Username
-	usernameToSessionID[data.Username] = sessionID
-	inGame, gameId := dbCheckPlayerInGameForSessionData(db, data.Username)
+	sessionData["username"] = Username
+	usernameToSessionID[Username] = sessionID
+	inQueue, inGame, gameId := dbCheckPlayerForSessionData(db, Username)
 	sessionData["inGame"] = inGame
 	sessionData["gameId"] = gameId
+	sessionData["inQueue"] = inQueue
 	setSession(sessionID, sessionData)
 
 	w.WriteHeader(http.StatusOK)
@@ -1389,13 +1413,19 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := r.URL.Query().Get("username")
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, exists := players3[username]; exists {
+		conn.WriteMessage(websocket.TextMessage, []byte("Username already in use"))
+		conn.Close()
+		return
+	}
+
 	client := &PlayerActive{conn: conn, username: username, lastPing: time.Now()}
+	players3[username] = client
 
 	fmt.Println(username, "has joined the queue.")
-
-	mu.Lock()
-	players3[username] = client
-	mu.Unlock()
 
 	go handleMessages(client)
 }
@@ -1408,7 +1438,7 @@ func handleMessages(client *PlayerActive) {
 	for {
 		_, message, err := client.conn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading message: %v", err)
+			log.Printf("Error reading message: a%v", err)
 			break
 		}
 
@@ -1432,7 +1462,7 @@ func handleMessages(client *PlayerActive) {
 }
 
 func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
-	pingInterval := 10 * time.Second      // Interval for sending pings
+	pingInterval := 3 * time.Second       // Interval for sending pings
 	inactivityTimeout := 15 * time.Second // Timeout for client inactivity
 	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
@@ -1448,6 +1478,9 @@ func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
 					log.Printf("Error while sending ping to client %s: %v", username, err)
 					// Close and remove client on error
 					client.conn.Close()
+					sessionID := usernameToSessionID[client.username]
+					sessionData := getSession(sessionID)
+					sessionData["inQueue"] = 0
 					delete(players3, username)
 					dbSetQueueOff(db, username)
 					index := findIndexByUsername(queuePlayersSlice, username)
@@ -1470,6 +1503,9 @@ func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
 					client.conn.Close()
 					delete(players3, username)
 					dbSetQueueOff(db, username)
+					sessionID := usernameToSessionID[username]
+					sessionData := getSession(sessionID)
+					sessionData["inQueue"] = 0
 					index := findIndexByUsername(queuePlayersSlice, username)
 					if index != -1 {
 						queuePlayersSlice = append(queuePlayersSlice[:index], queuePlayersSlice[index+1:]...)
@@ -1480,6 +1516,12 @@ func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
 			mu.Unlock()
 		}
 	}
+}
+
+func sendJSONError(w http.ResponseWriter, message string, statusCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 func main() {
@@ -1571,7 +1613,6 @@ func main() {
 	//queuePlayersAccepted = append(queuePlayersAccepted, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 
 	//var lobbyPlayers []Lobby
-	var queueCount int
 
 	/*
 		jsonData := readFile()
@@ -1588,8 +1629,8 @@ func main() {
 	mux := http.NewServeMux()
 	fmt.Print("Hi we are listening :D")
 	mux.Handle("/", http.FileServer(http.Dir("./FrontEnd/build")))
-	mux.Handle("/login/", http.StripPrefix("/login/", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir("./FrontEnd/build"))))
+	mux.Handle("/login", http.StripPrefix("/login", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.HandleFunc("/heartbeat", handleWebSocket)
 	go monitorClients(db, queuePlayersSlice)
 	//DEBUG PPROF
@@ -1614,6 +1655,8 @@ func main() {
 			})
 	*/
 	mux.HandleFunc("/queue", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.Context().Value("session_id").(string)
+		sessionData := getSession(sessionID)
 		var q Queuers
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&q)
@@ -1634,8 +1677,9 @@ func main() {
 		err = dbSetInQueue(db, q.Username)
 		if err != nil {
 			fmt.Println("\n/queue error: ", err)
-			http.Error(w, "User is InGame", http.StatusUnprocessableEntity)
+			sendJSONError(w, "User is InGame", http.StatusUnprocessableEntity)
 		} else {
+			sessionData["inQueue"] = 1
 			json.NewEncoder(w).Encode("received :3")
 		}
 	}))
@@ -1667,6 +1711,9 @@ func main() {
 			allVotes = append(allVotes[:index], allVotes[index+1:]...)
 		}
 		if index2 != -1 {
+			for _, p := range allGames[index2].Players {
+				setSessionDataOfInGameOff(p.Username)
+			}
 			allGames = append(allGames[:index2], allGames[index2+1:]...)
 		}
 		if index3 != -1 {
@@ -1725,7 +1772,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"message": "User created successfully"})
 	}))
 
-	mux.HandleFunc("/login", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/login-submit", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		handleLogin(db, w, r)
 	}))
 
@@ -1952,66 +1999,64 @@ func main() {
 	}))
 
 	mux.HandleFunc("/api/getplayers", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("1. Received request to /api/getplayers")
-		log.Printf("Content-Type: %s", r.Header.Get("Content-Type"))
-
-		// Read the entire body
 		body, err := ioutil.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("2. Error reading request body: %v", err)
 			http.Error(w, "Error reading request", http.StatusBadRequest)
 			return
 		}
-		log.Printf("3. Request body: %s", string(body))
 
-		// Parse the body
 		var g GameId
 		err = json.Unmarshal(body, &g)
 		if err != nil {
-			log.Printf("4. Error parsing request body: %v", err)
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		log.Printf("5. Parsed GameId: %+v", g)
 
-		// Rest of your handler code...
-
-		log.Printf("6. GameId is %s", g.Id)
 		allGamesMutex.Lock()
-		log.Print("6a. Acquired mutex lock")
 		defer allGamesMutex.Unlock()
 
-		log.Printf("6b. About to call checkForGameSliceId")
 		index := checkForGameSliceId(allGames, g.Id)
-		log.Printf("7. Index from checkForGameSliceId: %d", index)
 
 		if index == -1 {
-			log.Printf("8. Game not found, fetching from DB")
-			lobby, err := dbGetPlayers(db, g.Id)
-			if err != nil {
-				log.Printf("8a. Error fetching players from DB: %v", err)
+			var lobby []Lobby
+			retryCount := 0
+			maxRetries := 5
+
+			for retryCount < maxRetries {
+				lobby, err = dbGetPlayers(db, g.Id)
+				if err != nil {
+					http.Error(w, "Error fetching players", http.StatusInternalServerError)
+					return
+				}
+
+				if len(lobby) == 10 {
+					break
+				}
+
+				retryCount++
+				time.Sleep(500 * time.Millisecond)
 			}
-			log.Printf("10. Players fetched from DB: %+v", lobby)
+
+			if len(lobby) != 10 {
+				http.Error(w, "Failed to retrieve 10 players", http.StatusInternalServerError)
+				return
+			}
+
 			allGames = append(allGames, gamePlayers{GameId: g.Id, Players: lobby})
 			var index2 = checkForQueueSliceId(allQueues, g.Id)
 			if index2 != -1 {
 				allQueues = append(allQueues[:index2], allQueues[:index2+1]...)
 			}
-			fmt.Println("\n this is allGames: ", allGames)
-			fmt.Println("\n this is allQueues: ", allQueues)
 			index = len(allGames) - 1
 		}
 
 		finalLobby := allGames[index].Players
-		log.Printf("11. Sending lobby for gameId %s: %v", g.Id, finalLobby)
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(finalLobby); err != nil {
-			log.Printf("12. Error encoding response: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("13. Response sent successfully")
 	}))
 
 	mux.HandleFunc("/api/sendbovote", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -2082,8 +2127,10 @@ func main() {
 		index2 := checkForMapsId(allMaps, gameId)
 
 		if index2 == -1 {
+			copiedMaps := make([]mapList, len(baseMaps))
+			copy(copiedMaps, baseMaps)
 			allMaps = append(allMaps,
-				gameMap{GameId: gameId, mapList: baseMaps, Format: finalVote},
+				gameMap{GameId: gameId, mapList: copiedMaps, Format: finalVote},
 			)
 		}
 
@@ -2218,11 +2265,16 @@ func main() {
 			select {
 			case <-timeout:
 				json.NewEncoder(w).Encode("REDIRECT REQUEST TIMED OUT")
+				i := findIndexByUsername(queuePlayersSlice, ug.Username)
+				if i != -1 {
+					queuePlayersSlice = append(queuePlayersSlice[:i], queuePlayersSlice[i+1:]...)
+				}
 				return
 			case <-ticker.C:
 				if dbCountHowManyReady(db, ug.Id) == 10 {
 					sessionData["inGame"] = 1
 					sessionData["gameId"] = ug.Id
+					sessionData["inQueue"] = 0
 					i := findIndexByUsername(queuePlayersSlice, ug.Username)
 					if i != -1 {
 						queuePlayersSlice = append(queuePlayersSlice[:i], queuePlayersSlice[i+1:]...)
@@ -2278,7 +2330,6 @@ func main() {
 	}))
 
 	mux.HandleFunc("/queuenumbers", func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers to allow all origins. You may want to restrict this to specific origins in a production environment.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
 
@@ -2286,29 +2337,28 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		for i := 0; i < 10; {
-			queueCount = dbQueueCount(db)
-			fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf("%d people in queue", queueCount))
-			time.Sleep(500 * time.Millisecond)
-			w.(http.Flusher).Flush()
-		}
+		var previousQueueCount int
 
-		ctx := r.Context
-		<-ctx().Done()
+		ctx := r.Context()
 
-		/*
-			// Simulate sending events (you can replace this with real data)
-			for i := 0; i < 10; i++ {
-				fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf("Event %d", i))
-				time.Sleep(2 * time.Second)
-				w.(http.Flusher).Flush()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				currentQueueCount := dbQueueCount(db)
+
+				if currentQueueCount != previousQueueCount {
+					fmt.Fprintf(w, "data: %d people in queue\n\n", currentQueueCount)
+					w.(http.Flusher).Flush()
+					previousQueueCount = currentQueueCount
+				}
+
+				time.Sleep(500 * time.Millisecond)
 			}
-			// Simulate closing the connection
-			ctx := r.Context
-			<-ctx().Done()
-		*/
-
+		}
 	})
+
 	mux.HandleFunc("/api/logout", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2342,9 +2392,11 @@ func main() {
 			// Fetch inGame status and gameId from the session data
 			inGame, inGameOk := sessionData["inGame"].(int)
 			gameId, gameIdOk := sessionData["gameId"].(string)
+			inQueue, inQueueOk := sessionData["inQueue"].(int)
 
 			var inGameStatus int
 			var gameIdResponse string
+			var inQueueStatus int
 
 			if inGameOk && inGame == 1 {
 				// User is in a game
@@ -2358,11 +2410,16 @@ func main() {
 				gameIdResponse = ""
 			}
 
+			if inQueueOk {
+				inQueueStatus = inQueue
+			}
+
 			// Respond with username, inGame status, and gameId
 			response := map[string]interface{}{
 				"username": username,
 				"inGame":   inGameStatus,
 				"gameId":   gameIdResponse,
+				"inQueue":  inQueueStatus,
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -2383,25 +2440,20 @@ func main() {
 
 		var gId string = ""
 
-		// Simulate sending events (you can replace this with real data)
 		for i := 0; i < 10; {
-			if len(queuePlayersSlice) == 10 {
-				if (len(allQueues) == 0) || checkForQueueSlicePlayers(allQueues, queuePlayersSlice) == -1 {
+			if len(queuePlayersSlice) > 9 {
+				var indexAllQueues = checkForQueueSlicePlayers(allQueues, queuePlayersSlice)
+				if indexAllQueues == -1 {
 
-					var indexAllQueues = checkForQueueSlicePlayers(allQueues, queuePlayersSlice)
+					gId = randomString(5)
 
-					if indexAllQueues == -1 {
+					allQueues = append(allQueues,
+						gameQueue{GameId: gId, Players: queuePlayersSlice[:10]},
+					)
 
-						gId = randomString(5)
-
-						allQueues = append(allQueues,
-							gameQueue{GameId: gId, Players: queuePlayersSlice},
-						)
-
-					} else {
-						gId = allQueues[indexAllQueues].GameId
-					}
-
+				} else {
+					gId = allQueues[indexAllQueues].GameId
+					fmt.Println("sending this gameid:", gId)
 				}
 
 				fmt.Fprintf(w, "data: %s\n\n", fmt.Sprint("MATCH FOUND:"+gId))
@@ -2410,11 +2462,11 @@ func main() {
 				i = 11
 				break
 			}
-			fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf("Event %d", i))
+			fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf("InQueue %d", i))
 			time.Sleep(500 * time.Millisecond)
 			w.(http.Flusher).Flush()
 		}
-		// Simulate closing the connection
+
 		ctx := r.Context
 		<-ctx().Done()
 	}))

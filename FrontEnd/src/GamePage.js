@@ -582,6 +582,12 @@ function GamePage() {
 
   const handleMapAction = (mapName) => {
     console.log("this is mapname? :", mapName)
+    const currentTime = new Date().getTime();
+    if (currentTime - lastClickTime.current < 300) { // 300ms debounce time
+      console.log("Click too soon, ignoring");
+      return;
+    }
+    lastClickTime.current = currentTime;
     if (!currentUser || !isUsersTurn()) return;
     const mapPick = mapList.filter(map => map[0] === mapName)
     console.log("mapPick is", mapPick)

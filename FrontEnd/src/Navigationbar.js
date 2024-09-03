@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Container from 'react-bootstrap/Container';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, Navigate, useLocation } from 'react-router-dom';
 import Nav from 'react-bootstrap/Nav';
 import Navbar from 'react-bootstrap/Navbar';
 import NavDropdown from 'react-bootstrap/NavDropdown';
@@ -44,6 +44,9 @@ function Navigationbar() {
       });
       if (response.ok) {
         setUsername(null);
+        const homepage = window.location.href
+        window.location.href = window.location.href.split('?')[0] + '?cache_buster=' + new Date().getTime();
+        window.location.href = homepage
       }
     } catch (error) {
       console.error('Error logging out:', error);

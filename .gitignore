@@ -25,3 +25,7 @@
 #db
 maindb.db
 maindb.tar
+
+/test
+
+/.VSCodeCounter

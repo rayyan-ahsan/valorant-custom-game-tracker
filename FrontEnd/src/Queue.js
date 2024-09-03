@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Button from 'react-bootstrap/Button';
 import Modal from 'react-bootstrap/Modal';
 import Alert from 'react-bootstrap/Alert';
@@ -37,7 +37,7 @@ function AlertDismissibleExample({ show, handleClose }) {
 
 */
 
-function AlertDismissibleExample({ show, handleClose }) {
+function AlertDismissibleExample({ show, handleClose, alertMessage }) {
   return (
     <Modal
       show={show}
@@ -52,7 +52,7 @@ function AlertDismissibleExample({ show, handleClose }) {
         </Modal.Title>
       </Modal.Header>
       <Modal.Body className="text-center py-4">
-        You must leave your game in order to queue.
+        {alertMessage}
       </Modal.Body>
       <Modal.Footer className="border-top-0 justify-content-center">
         <Button variant="outline-danger" onClick={handleClose}>
@@ -61,6 +61,37 @@ function AlertDismissibleExample({ show, handleClose }) {
       </Modal.Footer>
     </Modal>
   );
+}
+
+function useQueueTimer(inQueue) {
+  const [time, setTime] = useState('00:00');
+  const startTimeRef = useRef(0);
+
+  useEffect(() => {
+    let intervalId;
+    if (inQueue) {
+      startTimeRef.current = new Date().getTime();
+      setTime('00:00'); // Reset the time immediately when joining queue
+      
+      intervalId = setInterval(() => {
+        const now = new Date().getTime();
+        const distance = now - startTimeRef.current;
+        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60)).toString().padStart(2, '0');
+        const seconds = Math.floor((distance % (1000 * 60)) / 1000).toString().padStart(2, '0');
+        setTime(`${minutes}:${seconds}`);
+      }, 1000);
+    } else {
+      setTime('00:00'); // Reset the time when leaving queue
+    }
+
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [inQueue]);
+
+  return time;
 }
 
 
@@ -80,6 +111,9 @@ function Queue() {
   const [showAlert, setShowAlert] = useState(false);
   const [alertMessage, setAlertMessage] = useState('');
   const [timerInterval, setTimerInterval] = useState(null);
+  const [checkCount, setCheckCount] = useState(0);
+  const time = useQueueTimer(inQueue);
+
 
   const handleCloseAlert = () => setShowAlert(false)
   const handleShowAlert = () => setShowAlert(true)
@@ -110,6 +144,7 @@ function Queue() {
         console.log('WebSocket connection closed. Attempting to reconnect...');
         setIsConnected(false);
         setInQueue(false);
+        clearInterval(timerInterval)
         setTimerInterval(null)
         const button = document.getElementById("queueBtn")
         button.className = "btn btn-lg btn-success btn-change"
@@ -137,6 +172,10 @@ function Queue() {
         console.log("ingame? :", data.inGame)
         setUsername(data.username);
         setGameId(data.gameId)
+        console.log("this is inQueue :3", data.inQueue)
+        if(data.inQueue == 1) {
+          setInQueue(true)
+        }
         setIsLoggedIn(true);
       } else {
         setIsLoggedIn(false);
@@ -150,6 +189,51 @@ function Queue() {
   useEffect(() => {
     checkLoginStatus();
   }, [])
+
+  useEffect(() => {
+    let timeoutId;
+    if (inQueue) {
+      const checkIntervals = [1000, 1000, 2000, 2000, 10000, 15000];
+      const scheduleNextCheck = () => {
+        const interval = checkCount < checkIntervals.length ? checkIntervals[checkCount] : checkIntervals[checkIntervals.length - 1];
+        timeoutId = setTimeout(() => {
+          checkQueueStatus();
+          setCheckCount(prevCount => prevCount + 1);
+          scheduleNextCheck();
+        }, interval);
+      };
+      scheduleNextCheck();
+    }
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, [inQueue, checkCount]);
+
+  const checkQueueStatus = async () => {
+    try {
+      const response = await fetch('/api/user', {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.inQueue !== 1) {
+          setInQueue(false);
+          clearInterval(timerInterval);
+          setTimerInterval(null);
+          const button = document.getElementById("queueBtn");
+          button.className = "btn btn-lg btn-success btn-change";
+          button.textContent = "Join Queue";
+          setAlertMessage("You have been removed from the queue.");
+          setShowAlert(true);
+        }
+      }
+    } catch (error) {
+      console.error('Error checking queue status:', error);
+    }
+  };
 
   useEffect(() => {
 
@@ -169,7 +253,6 @@ function Queue() {
 
     // Clean up the EventSource when the component unmounts
     return () => {
-      setInQueue(false)
       eventSource.close()
       setQueueEventSource(null)
       console.log('EventSource closed');
@@ -189,28 +272,6 @@ function Queue() {
     const button = document.getElementById("queueBtn")
     button.className = "btn btn-outline-secondary btn-lg disabled"
     button.textContent = "00:00"
-    var now = new Date().getTime();
-    var x = setInterval(function() {
-  
-      // Get today's date and time
-      var live = new Date().getTime();
-    
-      // Find the distance between now and the count down date
-      var distance = live - now;
-    
-      // Time calculations for days, hours, minutes and seconds
-      var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60)).toString().padStart(2, '0');
-      var seconds = Math.floor((distance % (1000 * 60)) / 1000).toString().padStart(2, '0');
-    
-      // Display the result in the element with id="demo"
-      document.getElementById("queueBtn").textContent = minutes + ":" + seconds + "";
-    
-      // If the count down is finished, write some text
-      if (distance < 0) {
-        clearInterval(x);
-      }
-    }, 1000);
-    setTimerInterval(x)
     fetch("/queue", {
       method: "POST",
       credentials: "include",
@@ -227,7 +288,7 @@ function Queue() {
       connectWebSocket()
     })
     .catch((err) => {
-      clearInterval(x)
+      clearInterval(timerInterval)
       console.log(err.message);
       button.className = "btn btn-lg btn-success btn-change"
       button.textContent = "Join Queue"
@@ -243,6 +304,7 @@ function Queue() {
     let inQueueEventSource
 
     if(inQueue){
+      console.log("hihihi")
 
       const inQueueEventSource = new EventSource('/api/inqueue');
 
@@ -275,7 +337,14 @@ function Queue() {
       }
     })
 
-  }, [inQueue, timerInterval])
+  }, [inQueue])
+
+  const buttonClass = inQueue 
+    ? "btn btn-outline-secondary btn-lg disabled"
+    : isLoggedIn 
+      ? "btn btn-lg btn-success btn-change"
+      : "btn btn-lg btn-primary";
+  const buttonText = inQueue ? time : isLoggedIn ? "Join Queue" : "Login to Queue";
 
   return (
   <>
@@ -283,19 +352,19 @@ function Queue() {
       <button
         id="queueBtn"
         type="button"
-        className={`btn btn-lg ${isLoggedIn ? 'btn-success btn-change' : 'btn-primary'}`}
+        className={buttonClass}
         onClick={handleButtonClick}
       >
-        {isLoggedIn ? 'Join Queue' : 'Login to Queue'}
+        {buttonText}
       </button>
       <p className="text-center" id="pplInQueue">
         0 people in queue
       </p>
       <div id="fakeModalTitle" style={{ display: 'none' }}></div>
-      <MatchFound show={show} handleClose={handleClose} username={username} gameId={gameId}/>
+      <MatchFound show={show} handleClose={handleClose} username={username} gameId={gameId} socket={socket} />
     </div>
     <div>
-    <AlertDismissibleExample show={showAlert} handleClose={handleCloseAlert} />
+    <AlertDismissibleExample show={showAlert} handleClose={handleCloseAlert} alertMessage={alertMessage} />
     </div>
   </>
   );

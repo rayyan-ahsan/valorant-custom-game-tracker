@@ -15,11 +15,12 @@ export function useModal() {
   return { show, handleClose, handleShow }
 }
 
-function MatchFound({ show, handleClose, username, gameId }) {
+function MatchFound({ show, handleClose, username, gameId, socket }) {
 
   const { handleShow } = useModal()
   const [timeLeft, setTimeLeft] = useState(30);
   const audioRef = useRef(new Audio(alertSound))
+  const endTimeRef = useRef(0);
   const [modalBody, setModalBody] = useState('🔲🔲🔲🔲🔲🔲🔲🔲🔲');
   //const [modalBodyAccepted, setModalBodyAccepted] = useState(null);
   const navigate = useNavigate();
@@ -53,6 +54,7 @@ function MatchFound({ show, handleClose, username, gameId }) {
         .then(data => {
           console.log("redirecting :3 :", data)
           if(/REDIRECT GameId:/.test(data)) {
+            socket.close()
             navigate('/game#'+gameId)
           }
         })
@@ -78,33 +80,33 @@ function MatchFound({ show, handleClose, username, gameId }) {
 
   useEffect(() => {
     let timerId;
+
     if (show) {
-      if (audioRef.current) {
-        audioRef.current.volume = 0.5
-      }
+      // Play audio
+      audioRef.current.volume = 0.5;
       audioRef.current.play();
-      setModalBody('🔲🔲🔲🔲🔲🔲🔲🔲🔲');
+
+      // Reset and start timer
+      setTimeLeft(30)
       timerId = setInterval(() => {
         setTimeLeft((prevTime) => {
           if (prevTime <= 1) {
             clearInterval(timerId);
             handleClose();
-            return 30;
+            return 0;
           }
           return prevTime - 1;
         });
       }, 1000);
-    } else {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
     }
 
     return () => {
+      // Clean up
       if (timerId) clearInterval(timerId);
-      audioRef.current.pause()
+      audioRef.current.pause();
       audioRef.current.currentTime = 0;
     };
-  }, [show, handleClose]);
+  }, [show]);
 
   function matchAccept() {
     fetch("/api/matchaccepted", {

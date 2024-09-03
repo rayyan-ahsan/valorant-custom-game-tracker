@@ -9,7 +9,7 @@ import { useNavigate } from 'react-router-dom'
 
 async function submitLogin(values, navigate, setError) {
   try {
-    const response = await fetch('/login', {
+    const response = await fetch('/login-submit', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
