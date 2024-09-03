@@ -51,10 +51,10 @@ function AlertDismissibleExample({ show, handleClose, alertMessage }) {
           Error
         </Modal.Title>
       </Modal.Header>
-      <Modal.Body className="text-center py-4">
+      <Modal.Body className="text-center py-4 bg-light">
         {alertMessage}
       </Modal.Body>
-      <Modal.Footer className="border-top-0 justify-content-center">
+      <Modal.Footer className="border-top-0 justify-content-center bg-light">
         <Button variant="outline-danger" onClick={handleClose}>
           Okay
         </Button>

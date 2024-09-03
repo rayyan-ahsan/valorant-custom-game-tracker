@@ -236,6 +236,15 @@ func sessionMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			})
 		} else {
 			sessionID = cookie.Value
+			http.SetCookie(w, &http.Cookie{
+				Name:     "session_id",
+				Value:    sessionID,
+				Expires:  time.Now().Add(sessionTTL), // refresh expiration time
+				Path:     "/",
+				SameSite: http.SameSiteStrictMode,
+				Secure:   true,
+				HttpOnly: true,
+			})
 		}
 
 		// Ensure session exists
@@ -1103,6 +1112,21 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	sessionData["inQueue"] = inQueue
 	setSession(sessionID, sessionData)
 
+	expiration := sessionTTL
+	if data.RememberMe {
+		expiration = 7 * 24 * time.Hour // 7 days for RememberMe
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_id",
+		Value:    sessionID,
+		Expires:  time.Now().Add(expiration),
+		Path:     "/",
+		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+		HttpOnly: true,
+	})
+
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Login successful"})
 
@@ -1111,7 +1135,7 @@ func handleLogin(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 var (
 	sessionStore        = make(map[string]map[string]interface{})
 	usernameToSessionID = make(map[string]string)
-	sessionTTL          = 30 * time.Minute
+	sessionTTL          = 60 * time.Minute
 )
 
 func generateSessionID() string {
