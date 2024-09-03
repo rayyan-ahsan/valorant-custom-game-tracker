@@ -1090,19 +1090,6 @@ func broadcastUpdateLobby(gameId string, lobby []Lobby) {
 		return
 	}
 
-	/*
-		eventMessage := EventMessage{
-			EventType: "message",
-			Data:      data,
-		}
-
-		eventData, err := json.Marshal(eventMessage.Data)
-		if err != nil {
-			log.Println("\nError marshalling event message: ", err)
-			return
-		}
-	*/
-
 	for _, client := range clients[gameId] {
 		client.ch <- fmt.Sprintf("event: updateLobby\ndata: %s\n\n", data)
 	}
