@@ -11,11 +11,12 @@ import reportWebVitals from './reportWebVitals';
 import "bootstrap/dist/css/bootstrap.min.css";
 // Bootstrap Bundle JS
 import "bootstrap/dist/js/bootstrap.bundle.min";
-import LoginPage from './LoginPage';
+import LoginPage from './Login';
 import Queue from './Queue';
 import Navigationbar from './Navigationbar';
 import GamePage from './GamePage';
 import SignupPage from './SignupPage';
+import ProfilePage from './Profile';
 import BOPollVote from './BestOfSeriesPoll';
 import SideSelectModal from './SideSelectChoice';
 import CoinFlip from './CoinFlipPage';
@@ -79,6 +80,19 @@ const router = createBrowserRouter([
     </div>
   },
   {
+    path: "/profile",
+    element:
+    <div>
+    <div className="App">
+    <Navigationbar/>
+    </div>
+    <div className="Login-form-bg">
+        <ProfilePage/>
+    </div>
+    </div>
+  },
+  /*
+  {
     path: "/testcoinflip",
     element:
     <div>
@@ -90,6 +104,7 @@ const router = createBrowserRouter([
     </div>
     </div>
   },
+  */
 ]);
 
 const root = ReactDOM.createRoot(document.getElementById('root'));

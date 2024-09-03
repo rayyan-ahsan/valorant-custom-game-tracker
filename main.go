@@ -281,6 +281,40 @@ func dbRead(db *sql.DB) {
 	}
 }
 
+func dbChangeUsername(db *sql.DB, oldUsername, newUsername string) error {
+	// Begin a transaction
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("could not begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var inQueue, inGame bool
+	err = tx.QueryRow(`SELECT "InQueue", "InGame" FROM "Users" WHERE "Username" = $1`, oldUsername).Scan(&inQueue, &inGame)
+	if err != nil {
+		return fmt.Errorf("could not fetch user status: %w", err)
+	}
+
+	if inQueue || inGame {
+		return fmt.Errorf("user cannot change username while in a queue or in-game")
+	}
+
+	if oldUsername == newUsername {
+		return fmt.Errorf("new username is the same as the current username")
+	}
+
+	_, err = tx.Exec(`UPDATE "Users" SET "Username" = $1 WHERE "Username" = $2`, newUsername, oldUsername)
+	if err != nil {
+		return fmt.Errorf("could not update username: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("could not commit transaction: %w", err)
+	}
+
+	return nil
+}
+
 func dbCheckUsersTable(db *sql.DB) {
 
 	createTableQuery := `
@@ -1478,9 +1512,13 @@ func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
 					log.Printf("Error while sending ping to client %s: %v", username, err)
 					// Close and remove client on error
 					client.conn.Close()
-					sessionID := usernameToSessionID[client.username]
-					sessionData := getSession(sessionID)
-					sessionData["inQueue"] = 0
+					sessionID, sessionExists := usernameToSessionID[username]
+					if sessionExists {
+						sessionData := getSession(sessionID)
+						if sessionData != nil {
+							sessionData["inQueue"] = 0
+						}
+					}
 					delete(players3, username)
 					dbSetQueueOff(db, username)
 					index := findIndexByUsername(queuePlayersSlice, username)
@@ -1631,6 +1669,7 @@ func main() {
 	mux.Handle("/", http.FileServer(http.Dir("./FrontEnd/build")))
 	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.Handle("/login", http.StripPrefix("/login", http.FileServer(http.Dir("./FrontEnd/build"))))
+	mux.Handle("/profile", http.StripPrefix("/profile", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.HandleFunc("/heartbeat", handleWebSocket)
 	go monitorClients(db, queuePlayersSlice)
 	//DEBUG PPROF
@@ -1654,6 +1693,40 @@ func main() {
 				}
 			})
 	*/
+
+	mux.HandleFunc("/api/update-username", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		var user Usernamers
+		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+			http.Error(w, "Invalid request payload", http.StatusBadRequest)
+			return
+		}
+
+		sessionID := r.Context().Value("session_id").(string)
+		sessionData := getSession(sessionID)
+		currentUsername := sessionData["username"].(string)
+
+		if user.Username == "" {
+			http.Error(w, "Username cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		if user.Username == currentUsername {
+			http.Error(w, "New username is the same as the current username", http.StatusBadRequest)
+			return
+		}
+
+		err := dbChangeUsername(db, currentUsername, user.Username)
+		if err != nil {
+			sendJSONError(w, "Couldn't change username, you might be In Queue or In Game.", http.StatusConflict)
+			return
+		}
+		sessionData["username"] = user.Username
+
+		response := map[string]string{"message": "Username updated successfully"}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+
 	mux.HandleFunc("/queue", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		sessionID := r.Context().Value("session_id").(string)
 		sessionData := getSession(sessionID)

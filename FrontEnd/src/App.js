@@ -1,6 +1,6 @@
 import logo from './logo.svg';
 import './App.css';
-import LoginPage from './LoginPage';
+import LoginPage from './Login';
 import Queue from './Queue';
 import Navigationbar from './Navigationbar';
 import {
