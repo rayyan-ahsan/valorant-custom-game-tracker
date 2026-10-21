@@ -29,3 +29,7 @@ maindb.tar
 /test
 
 /.VSCodeCounter
+
+# Local test databases and test runner caches
+/.test-postgres/
+/FrontEnd/.jest-cache/

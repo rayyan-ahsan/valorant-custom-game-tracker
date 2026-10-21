@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,8 @@ type SignupData struct {
 var (
 	allGames      []gamePlayers
 	allGamesMutex sync.Mutex
+	// stateMu protects sessions and queue/lobby mutations. Streams release it before waiting.
+	stateMu sync.Mutex
 )
 
 type Game struct {
@@ -164,8 +167,10 @@ type Message struct {
 }
 
 type boVotes struct {
-	GameId string
-	Votes  []int
+	GameId   string
+	Votes    []int
+	Voters   map[string]string
+	Deadline time.Time
 }
 
 type Player struct {
@@ -184,6 +189,7 @@ type Lobby struct {
 type Client struct {
 	gameId string
 	ch     chan string
+	cancel context.CancelFunc
 }
 
 type queuePlayers struct {
@@ -214,12 +220,25 @@ type gameMap struct {
 }
 
 var clients = make(map[string][]*Client)
+var clientsMu sync.RWMutex
 
 var inQueueCounter = 0
 
 var game Game
 
 func sessionMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return streamSessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		id := r.Context().Value("session_id").(string)
+		if getSession(id) == nil {
+			setSession(id, make(map[string]interface{}))
+		}
+		next(w, r)
+	})
+}
+
+func streamSessionMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("session_id")
 		var sessionID string
@@ -248,9 +267,12 @@ func sessionMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Ensure session exists
+		stateMu.Lock()
 		if getSession(sessionID) == nil {
 			setSession(sessionID, make(map[string]interface{}))
 		}
+
+		stateMu.Unlock()
 
 		// Pass session data to handlers
 		r = r.WithContext(context.WithValue(r.Context(), "session_id", sessionID))
@@ -344,13 +366,13 @@ func dbCheckUsersTable(db *sql.DB) {
 
 	_, err := db.Exec(createTableQuery)
 	if err != nil {
-		log.Fatalf("Failed to create Users table: %v", err)
+		log.Printf("Failed to create Users table: %v", err)
 	}
 	fmt.Println("Users table is present or created successfully.")
 
 	_, err = db.Exec(createIndexQuery)
 	if err != nil {
-		log.Fatalf("Failed to create Unique Index for Username", err)
+		log.Printf("Failed to create Unique Index for Username: %v", err)
 	}
 	fmt.Println("Users table has the Unique constraint succesfully added")
 }
@@ -559,7 +581,8 @@ func dbAddAllPlayersToGame(db *sql.DB, gameId string) {
         INSERT INTO "%s" (UsernameID, Captain, Team)
         SELECT "ID", 0 AS Captain, 0 AS Team
         FROM "Users"
-        WHERE "InGame" = true AND "GameId" = $1;
+        WHERE "InGame" = true AND "GameId" = $1
+        ON CONFLICT (UsernameID) DO NOTHING;
     `, gameId)
 
 	_, err := db.Exec(query, gameId)
@@ -650,7 +673,7 @@ func dbCheckGame(db *sql.DB, gameId string) bool {
 	query := `
         SELECT COUNT(*)
         FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name = $1;
+        WHERE table_schema = current_schema() AND table_name = $1;
     `
 
 	var count int
@@ -1164,6 +1187,19 @@ func deleteSession(sessionID string) {
 	delete(sessionStore, sessionID)
 }
 
+func broadcastEvent(gameID, event string) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+	for _, client := range clients[gameID] {
+		select {
+		case client.ch <- event:
+		default:
+			// Reconnect a stalled browser instead of blocking every player.
+			client.cancel()
+		}
+	}
+}
+
 func broadcastUpdateLobby(gameId string, lobby []Lobby) {
 
 	data, err := json.Marshal(lobby)
@@ -1172,9 +1208,7 @@ func broadcastUpdateLobby(gameId string, lobby []Lobby) {
 		return
 	}
 
-	for _, client := range clients[gameId] {
-		client.ch <- fmt.Sprintf("event: updateLobby\ndata: %s\n\n", data)
-	}
+	broadcastEvent(gameId, fmt.Sprintf("event: updateLobby\ndata: %s\n\n", data))
 }
 
 func broadcastUpdateTeam(gameId string, lobby []Lobby, allVotes *[]boVotes) {
@@ -1210,9 +1244,7 @@ func broadcastUpdateTeam(gameId string, lobby []Lobby, allVotes *[]boVotes) {
 		return
 	}
 
-	for _, client := range clients[gameId] {
-		client.ch <- fmt.Sprintf("event: currentTeam\ndata: %s\n\n", eventData)
-	}
+	broadcastEvent(gameId, fmt.Sprintf("event: currentTeam\ndata: %s\n\n", eventData))
 
 	if currentTeam == "0" {
 		broadcastUpdateBestOfXVote(gameId, allVotes)
@@ -1226,9 +1258,7 @@ func broadcastUpdateMaps(gameId string, mapList []mapList, finalVote string) {
 		return
 	}
 
-	for _, client := range clients[gameId] {
-		client.ch <- fmt.Sprintf("event: mapList\ndata: %s\n\n", data)
-	}
+	broadcastEvent(gameId, fmt.Sprintf("event: mapList\ndata: %s\n\n", data))
 
 	broadcastUpdateTeamMaps(gameId, mapList, finalVote)
 }
@@ -1242,9 +1272,7 @@ func BroadcastUpdateGameCancelled(gameId string, username string) {
 		log.Println("Lobby killing failed")
 	}
 
-	for _, client := range clients[gameId] {
-		client.ch <- fmt.Sprintf("event: kill\ndata: %s\n\n", data)
-	}
+	broadcastEvent(gameId, fmt.Sprintf("event: kill\ndata: %s\n\n", data))
 
 }
 
@@ -1336,9 +1364,7 @@ func broadcastUpdateTeamMaps(gameId string, mapList []mapList, finalVote string)
 		return
 	}
 
-	for _, client := range clients[gameId] {
-		client.ch <- fmt.Sprintf("event: currentTeam\ndata: %s\n\n", eventData)
-	}
+	broadcastEvent(gameId, fmt.Sprintf("event: currentTeam\ndata: %s\n\n", eventData))
 
 }
 
@@ -1350,9 +1376,7 @@ func broadcastUpdateTeamSide(mapSide []mapSide, gameId string) {
 		return
 	}
 
-	for _, client := range clients[gameId] {
-		client.ch <- fmt.Sprintf("event: mapsides\ndata: %s\n\n", eventData)
-	}
+	broadcastEvent(gameId, fmt.Sprintf("event: mapsides\ndata: %s\n\n", eventData))
 }
 
 func broadcastUpdateBestOfXVote(gameId string, allVotes *[]boVotes) {
@@ -1363,7 +1387,7 @@ func broadcastUpdateBestOfXVote(gameId string, allVotes *[]boVotes) {
 		fmt.Println("allvotes before append:", *allVotes)
 		var votes []int = []int{0, 0, 0}
 		*allVotes = append(*allVotes,
-			boVotes{GameId: gameId, Votes: votes},
+			boVotes{GameId: gameId, Votes: votes, Voters: make(map[string]string), Deadline: time.Now().Add(30 * time.Second)},
 		)
 		fmt.Println("allvotes after append:", *allVotes)
 		data, err := json.Marshal("vote time")
@@ -1371,31 +1395,17 @@ func broadcastUpdateBestOfXVote(gameId string, allVotes *[]boVotes) {
 			log.Println("Error sending bestof vote:", err)
 			return
 		}
-		for _, client := range clients[gameId] {
-			client.ch <- fmt.Sprintf("event: bestofseriesVote\ndata: %s\n\n", data)
-		}
+		broadcastEvent(gameId, fmt.Sprintf("event: bestofseriesVote\ndata: %s\n\n", data))
 
-		go func() {
-			time.Sleep(30 * time.Second)
-			finalIndex := checkForBoVotesId(*allVotes, gameId)
-			if finalIndex != -1 {
-				*allVotes = append((*allVotes)[:finalIndex], (*allVotes)[finalIndex+1:]...)
-				fmt.Println("allVotes should have been removed:", allVotes)
-			} else {
-				fmt.Println("gameId not found for allVotes removal")
-			}
+		// Keep vote results until lobby cleanup for reconnecting clients.
 
-		}()
 	} else {
 		data, err := json.Marshal((*allVotes)[index].Votes)
 		if err != nil {
 			log.Println("Error sending best of vote:", err)
 			return
 		}
-		for _, client := range clients[gameId] {
-			fmt.Println("bestofseriesVote: ", data)
-			client.ch <- fmt.Sprintf("event: bestofseriesVote\ndata: %s\n\n", data)
-		}
+		broadcastEvent(gameId, fmt.Sprintf("event: bestofseriesVote\ndata: %s\n\n", data))
 	}
 }
 
@@ -1519,63 +1529,46 @@ func handleMessages(client *PlayerActive) {
 	}
 }
 
-func monitorClients(db *sql.DB, queuePlayersSlice []queuePlayers) {
-	pingInterval := 3 * time.Second       // Interval for sending pings
-	inactivityTimeout := 15 * time.Second // Timeout for client inactivity
-	pingTicker := time.NewTicker(pingInterval)
-	defer pingTicker.Stop()
-
+// monitorClients updates the actual queue, not a copy of its slice header.
+func monitorClients(ctx context.Context, db *sql.DB, queuePlayersSlice *[]queuePlayers) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-pingTicker.C:
-			// Send pings to all connected clients
-			mu.Lock()
-			for username, client := range players3 {
-				err := client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
-				if err != nil {
-					log.Printf("Error while sending ping to client %s: %v", username, err)
-					// Close and remove client on error
-					client.conn.Close()
-					sessionID, sessionExists := usernameToSessionID[username]
-					if sessionExists {
-						sessionData := getSession(sessionID)
-						if sessionData != nil {
-							sessionData["inQueue"] = 0
-						}
-					}
-					delete(players3, username)
-					dbSetQueueOff(db, username)
-					index := findIndexByUsername(queuePlayersSlice, username)
-					if index != -1 {
-						queuePlayersSlice = append(queuePlayersSlice[:index], queuePlayersSlice[index+1:]...)
-					}
-					fmt.Println(queuePlayersSlice)
-				}
-			}
-			mu.Unlock()
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			sweepClients(db, queuePlayersSlice, now)
+		}
+	}
+}
 
-		case <-time.After(inactivityTimeout):
-			// Check for inactive clients
-			now := time.Now()
-			mu.Lock()
-			for username, client := range players3 {
-				client.mu.Lock()
-				if now.Sub(client.lastPing) > inactivityTimeout {
-					log.Printf("Client %s inactive. Removing from queue.", username)
-					client.conn.Close()
-					delete(players3, username)
-					dbSetQueueOff(db, username)
-					sessionID := usernameToSessionID[username]
-					sessionData := getSession(sessionID)
-					sessionData["inQueue"] = 0
-					index := findIndexByUsername(queuePlayersSlice, username)
-					if index != -1 {
-						queuePlayersSlice = append(queuePlayersSlice[:index], queuePlayersSlice[index+1:]...)
-					}
-				}
-				client.mu.Unlock()
+func sweepClients(db *sql.DB, queuePlayersSlice *[]queuePlayers, now time.Time) {
+	mu.Lock()
+	defer mu.Unlock()
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	for username, client := range players3 {
+		client.mu.Lock()
+		inactive := now.Sub(client.lastPing) > 15*time.Second
+		client.mu.Unlock()
+		err := client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
+		if err == nil && !inactive {
+			continue
+		}
+		client.conn.Close()
+		delete(players3, username)
+		if sessionID, ok := usernameToSessionID[username]; ok {
+			if session := getSession(sessionID); session != nil {
+				session["inQueue"] = 0
 			}
-			mu.Unlock()
+		}
+		if err := dbSetQueueOff(db, username); err != nil {
+			log.Printf("Remove disconnected player: %v", err)
+		}
+		index := findIndexByUsername(*queuePlayersSlice, username)
+		if index != -1 {
+			*queuePlayersSlice = append((*queuePlayersSlice)[:index], (*queuePlayersSlice)[index+1:]...)
 		}
 	}
 }
@@ -1640,6 +1633,34 @@ func main() {
 		dbSetQueueOff(db, "rayyan")
 	*/
 
+	server := newTrackerServer(db)
+	go monitorClients(context.Background(), db, server.queuePlayers)
+
+	if PORT == "" {
+		PORT = "3000"
+	}
+
+	if ADDR == "" {
+		ADDR = ""
+	}
+
+	log.Printf("Starting server on %s:%s", ADDR, PORT)
+
+	fmt.Println(ADDR + ":" + PORT)
+	http.ListenAndServe(ADDR+":"+PORT, server)
+}
+
+// trackerServer exposes the production routes without opening a listener or resetting the database.
+type trackerServer struct {
+	handler      http.Handler
+	queuePlayers *[]queuePlayers
+}
+
+func (s *trackerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+func newTrackerServer(db *sql.DB) *trackerServer {
 	queuePlayersSlice := make([]queuePlayers, 0, 10)
 	//queuePlayers = append(queuePlayers, "MistaDong", "iMaple", "Allie", "Ria", "Chi", "TenZ", "Vincent", "Jordan", "Evan")
 	/*
@@ -1695,7 +1716,6 @@ func main() {
 	mux.Handle("/login", http.StripPrefix("/login", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.Handle("/profile", http.StripPrefix("/profile", http.FileServer(http.Dir("./FrontEnd/build"))))
 	mux.HandleFunc("/heartbeat", handleWebSocket)
-	go monitorClients(db, queuePlayersSlice)
 	//DEBUG PPROF
 	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
 	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
@@ -1752,33 +1772,29 @@ func main() {
 	}))
 
 	mux.HandleFunc("/queue", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		sessionID := r.Context().Value("session_id").(string)
-		sessionData := getSession(sessionID)
+		sessionData := getSession(r.Context().Value("session_id").(string))
 		var q Queuers
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&q)
-		if err != nil {
-			panic(err)
+		if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
+			http.Error(w, "Invalid queue request", http.StatusBadRequest)
+			return
 		}
-
-		index := findIndexByUsername(queuePlayersSlice, q.Username)
-
-		if index != -1 {
-			queuePlayersSlice = append(queuePlayersSlice[:index], queuePlayersSlice[index+1:]...)
+		if username, ok := sessionData["username"].(string); !ok || username != q.Username {
+			http.Error(w, "Log in as the queued player", http.StatusUnauthorized)
+			return
 		}
-		queuePlayersSlice = append(queuePlayersSlice,
-			queuePlayers{username: q.Username, accepted: 0},
-		)
-		//queuePlayersAccepted = append(queuePlayersAccepted, 0)
-		fmt.Println(q.Username)
-		err = dbSetInQueue(db, q.Username)
-		if err != nil {
-			fmt.Println("\n/queue error: ", err)
+		if sessionData["inGame"] == 1 {
+			http.Error(w, "User is InGame", http.StatusUnprocessableEntity)
+			return
+		}
+		if err := dbSetInQueue(db, q.Username); err != nil {
 			sendJSONError(w, "User is InGame", http.StatusUnprocessableEntity)
-		} else {
-			sessionData["inQueue"] = 1
-			json.NewEncoder(w).Encode("received :3")
+			return
 		}
+		if findIndexByUsername(queuePlayersSlice, q.Username) == -1 {
+			queuePlayersSlice = append(queuePlayersSlice, queuePlayers{username: q.Username})
+		}
+		sessionData["inQueue"] = 1
+		json.NewEncoder(w).Encode("received :3")
 	}))
 
 	mux.HandleFunc("/api/killlobby", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -1898,9 +1914,25 @@ func main() {
 		}
 
 		index := checkForMapsId(allMaps, x.GameId)
+		if index == -1 {
+			http.Error(w, "Map veto not found", http.StatusNotFound)
+			return
+		}
+		if action == 0 {
+			http.Error(w, "Invalid map action", http.StatusBadRequest)
+			return
+		}
 
 		for i := range allMaps[index].mapList {
 			if allMaps[index].mapList[i].Name == x.Map {
+				if previous := allMaps[index].mapList[i]; previous.Action != 0 {
+					if previous.Action == action && previous.Team == x.Team {
+						json.NewEncoder(w).Encode("maps :D")
+					} else {
+						http.Error(w, "Map has already been selected", http.StatusConflict)
+					}
+					return
+				}
 				allMaps[index].mapList[i].Team = x.Team
 				allMaps[index].mapList[i].Action = action
 				fmt.Println("allMaps maplist before broadcast update: ", allMaps[index].mapList)
@@ -1940,11 +1972,18 @@ func main() {
 		}
 
 		var index = checkForGameSliceId(allGames, x.GameId)
+		if index == -1 {
+			http.Error(w, "Lobby not found", http.StatusNotFound)
+			return
+		}
 
 		for i := range allGames[index].Players {
 			if allGames[index].Players[i].Username == x.Username {
 				if allGames[index].Players[i].Team == x.Team {
 					break
+				} else if allGames[index].Players[i].Team != 0 {
+					http.Error(w, "Player has already been drafted", http.StatusConflict)
+					return
 				} else {
 					allGames[index].Players[i].Team = x.Team
 					dbSetTeam(db, x.GameId, x.Username, x.Team)
@@ -2016,6 +2055,16 @@ func main() {
 			)
 			index = checkForSidesId(allSides, x.GameId)
 		} else {
+			for _, side := range allSides[index].Sides {
+				if side.MapName == x.MapName {
+					if side.AttackerTeam == attackerTeam {
+						json.NewEncoder(w).Encode("all good fam")
+					} else {
+						http.Error(w, "Side has already been selected", http.StatusConflict)
+					}
+					return
+				}
+			}
 			allSides[index].Sides = append(allSides[index].Sides,
 				mapSide{MapName: x.MapName, AttackerTeam: attackerTeam},
 			)
@@ -2142,7 +2191,7 @@ func main() {
 			allGames = append(allGames, gamePlayers{GameId: g.Id, Players: lobby})
 			var index2 = checkForQueueSliceId(allQueues, g.Id)
 			if index2 != -1 {
-				allQueues = append(allQueues[:index2], allQueues[:index2+1]...)
+				allQueues = append(allQueues[:index2], allQueues[index2+1:]...)
 			}
 			index = len(allGames) - 1
 		}
@@ -2166,6 +2215,7 @@ func main() {
 		fmt.Println("\ngameId is:", gameId)
 		if err != nil {
 			http.Error(w, "u goofed up bud", http.StatusConflict)
+			return
 		}
 
 		index := checkForBoVotesId(allVotes, gameId)
@@ -2174,6 +2224,33 @@ func main() {
 
 		if index == -1 {
 			http.Error(w, "u goofed up even worse bud", http.StatusForbidden)
+			return
+		}
+		username, _ := getSession(r.Context().Value("session_id").(string))["username"].(string)
+		lobbyIndex := checkForGameSliceId(allGames, gameId)
+		member := false
+		if lobbyIndex != -1 {
+			for _, player := range allGames[lobbyIndex].Players {
+				if player.Username == username {
+					member = true
+					break
+				}
+			}
+		}
+		if !member {
+			http.Error(w, "Lobby membership required", http.StatusForbidden)
+			return
+		}
+		if previous, exists := allVotes[index].Voters[username]; exists {
+			if previous == vote {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				http.Error(w, "Vote already submitted", http.StatusConflict)
+			}
+			return
+		}
+		if time.Now().After(allVotes[index].Deadline) || checkForMapsId(allMaps, gameId) != -1 {
+			http.Error(w, "Voting has closed", http.StatusConflict)
 			return
 		}
 
@@ -2190,6 +2267,7 @@ func main() {
 			return
 		}
 
+		allVotes[index].Voters[username] = vote
 		broadcastUpdateBestOfXVote(gameId, &allVotes)
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "Vote submitted successfully")
@@ -2198,6 +2276,10 @@ func main() {
 
 	mux.HandleFunc("/api/finalseriesvote", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		gameId := r.URL.Query().Get("gameId")
+		if index := checkForMapsId(allMaps, gameId); index != -1 {
+			json.NewEncoder(w).Encode(allMaps[index].Format)
+			return
+		}
 
 		index := checkForBoVotesId(allVotes, gameId)
 
@@ -2237,15 +2319,27 @@ func main() {
 
 	mux.HandleFunc("/api/matchaccepted", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		var u Usernamers
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&u)
-		if err != nil {
-			panic(err)
+		if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+			http.Error(w, "Invalid acceptance request", http.StatusBadRequest)
+			return
 		}
-		var index int = findIndexByUsername(queuePlayersSlice, u.Username)
-		fmt.Println("\n\nhewwo : ", index)
+		if getSession(r.Context().Value("session_id").(string))["username"] != u.Username {
+			http.Error(w, "Log in as the accepting player", http.StatusUnauthorized)
+			return
+		}
+		index := findIndexByUsername(queuePlayersSlice, u.Username)
+		if index == -1 {
+			http.Error(w, "Player is not queued", http.StatusConflict)
+			return
+		}
 		queuePlayersSlice[index].accepted = 1
-		fmt.Println("RECEIVED MY DAWG")
+		for i := range allQueues {
+			for j := range allQueues[i].Players {
+				if allQueues[i].Players[j].username == u.Username {
+					allQueues[i].Players[j].accepted = 1
+				}
+			}
+		}
 		json.NewEncoder(w).Encode("received :33")
 	}))
 
@@ -2293,81 +2387,82 @@ func main() {
 
 	}))
 
-	mux.HandleFunc("/api/matchaccepters", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
-
+	mux.HandleFunc("/api/matchaccepters", streamSessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-
-		for i := 0; i < 10; {
-			var s string = ""
-			Count := countAccepted(queuePlayersSlice)
-			if Count == 10 {
-				break
-			}
-			for y := 0; y < Count; y++ {
-				s = s + "✅"
-			}
-			for z := 0; z < 10-Count; z++ {
-				s = s + "🔲"
-			}
-			fmt.Fprintf(w, "data: %s\n\n", fmt.Sprint(s))
-			time.Sleep(500 * time.Millisecond)
-			w.(http.Flusher).Flush()
-		}
-
-		//gameId := randomString(5)
-		//dbCreateGame(db, gameId)
-
-		fmt.Fprintf(w, "data: %s\n\n", fmt.Sprint("✅✅✅✅✅✅✅✅✅✅"))
-		w.(http.Flusher).Flush()
-
-		//fmt.Fprintf(w, "data: %s\n\n", fmt.Sprint("REDIRECT"))
-		//w.(http.Flusher).Flush()
-
-		ctx := r.Context
-		<-ctx().Done()
-
-	}))
-	mux.HandleFunc("/api/redirecttogame", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		sessionID := r.Context().Value("session_id").(string)
-		sessionData := getSession(sessionID)
-		var ug UserGame
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&ug)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		fmt.Println("\n gameid is:", ug.Id)
-		fmt.Println("\nthe length of it is", len(ug.Id))
-
-		if len(ug.Id) != 5 {
-			http.Error(w, "incorrect gameId given", http.StatusBadRequest)
-			return
-		}
-
-		if !(dbCheckGame(db, ug.Id)) {
-			dbCreateGame(db, ug.Id)
-		}
-
-		dbInGame(db, ug.Username, ug.Id)
-		timeout := time.After(30 * time.Second)
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-
 		for {
-			select {
-			case <-timeout:
-				json.NewEncoder(w).Encode("REDIRECT REQUEST TIMED OUT")
-				i := findIndexByUsername(queuePlayersSlice, ug.Username)
-				if i != -1 {
-					queuePlayersSlice = append(queuePlayersSlice[:i], queuePlayersSlice[i+1:]...)
+			stateMu.Lock()
+			username, _ := getSession(r.Context().Value("session_id").(string))["username"].(string)
+			count := 0
+			for _, q := range allQueues {
+				if findIndexByUsername(q.Players, username) != -1 {
+					count = countAccepted(q.Players)
+					break
 				}
+			}
+			stateMu.Unlock()
+			fmt.Fprintf(w, "data: %s%s\n\n", strings.Repeat("✅", count), strings.Repeat("🔲", max(0, 10-count)))
+			w.(http.Flusher).Flush()
+			if count == 10 {
+				return
+			}
+			select {
+			case <-r.Context().Done():
 				return
 			case <-ticker.C:
+			}
+		}
+	}))
+
+	mux.HandleFunc("/api/redirecttogame", streamSessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		var ug UserGame
+		if err := json.NewDecoder(r.Body).Decode(&ug); err != nil {
+			http.Error(w, "Invalid redirect request", http.StatusBadRequest)
+			return
+		}
+		stateMu.Lock()
+		sessionData := getSession(r.Context().Value("session_id").(string))
+		if sessionData["username"] != ug.Username {
+			stateMu.Unlock()
+			http.Error(w, "Log in as the redirecting player", http.StatusUnauthorized)
+			return
+		}
+		if sessionData["inGame"] == 1 && sessionData["gameId"] == ug.Id {
+			stateMu.Unlock()
+			json.NewEncoder(w).Encode("REDIRECT GameId:" + ug.Id)
+			return
+		}
+		index := checkForQueueSliceId(allQueues, ug.Id)
+		if index == -1 || countAccepted(allQueues[index].Players) != 10 || findIndexByUsername(allQueues[index].Players, ug.Username) == -1 {
+			stateMu.Unlock()
+			http.Error(w, "Match is not ready", http.StatusConflict)
+			return
+		}
+		// Release the state lock before waiting for the other nine players.
+		if !dbCheckGame(db, ug.Id) {
+			dbCreateGame(db, ug.Id)
+		}
+		err := dbInGame(db, ug.Username, ug.Id)
+		stateMu.Unlock()
+		if err != nil {
+			http.Error(w, "Could not join match", http.StatusInternalServerError)
+			return
+		}
+		timeout := time.NewTimer(30 * time.Second)
+		defer timeout.Stop()
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-timeout.C:
+				http.Error(w, "Redirect request timed out", http.StatusRequestTimeout)
+				return
+			case <-ticker.C:
+				stateMu.Lock()
 				if dbCountHowManyReady(db, ug.Id) == 10 {
 					sessionData["inGame"] = 1
 					sessionData["gameId"] = ug.Id
@@ -2376,54 +2471,54 @@ func main() {
 					if i != -1 {
 						queuePlayersSlice = append(queuePlayersSlice[:i], queuePlayersSlice[i+1:]...)
 					}
-					fmt.Println("\nthis is the queueplayersslice after redirecting:", queuePlayersSlice)
+					stateMu.Unlock()
 					json.NewEncoder(w).Encode("REDIRECT GameId:" + ug.Id)
 					return
-				} else {
-					json.NewEncoder(w).Encode("ALL PLAYERS NOT READY YET")
 				}
+				stateMu.Unlock()
 			}
 		}
 	}))
 
-	mux.HandleFunc("/api/liveteamview", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/liveteamview", streamSessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		gameId := r.URL.Query().Get("gameId")
 		if gameId == "" {
 			http.Error(w, "gameId required", http.StatusBadRequest)
 			return
 		}
-
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 			return
 		}
-
-		client := &Client{
-			gameId: gameId,
-			ch:     make(chan string),
-		}
-
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		client := &Client{gameId: gameId, ch: make(chan string, 64), cancel: cancel}
+		clientsMu.Lock()
 		clients[gameId] = append(clients[gameId], client)
-
-		// Set headers for SSE
+		clientsMu.Unlock()
+		defer func() {
+			clientsMu.Lock()
+			clients[gameId] = removeClient(clients[gameId], client)
+			if len(clients[gameId]) == 0 {
+				delete(clients, gameId)
+			}
+			clientsMu.Unlock()
+		}()
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-
-		// Listen to the client's channel and send events
+		flusher.Flush()
 		for {
 			select {
 			case msg := <-client.ch:
-				fmt.Fprint(w, msg)
+				if _, err := fmt.Fprint(w, msg); err != nil {
+					return
+				}
 				flusher.Flush()
-			case <-r.Context().Done():
-				// Client disconnected
-				clients[gameId] = removeClient(clients[gameId], client)
+			case <-ctx.Done():
 				return
 			}
 		}
-
 	}))
 
 	mux.HandleFunc("/queuenumbers", func(w http.ResponseWriter, r *http.Request) {
@@ -2526,54 +2621,58 @@ func main() {
 		}
 	}))
 
-	mux.HandleFunc("/api/inqueue", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers to allow all origins. You may want to restrict this to specific origins in a production environment.
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Type")
-
+	mux.HandleFunc("/api/inqueue", streamSessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-
-		var gId string = ""
-
-		for i := 0; i < 10; {
-			if len(queuePlayersSlice) > 9 {
-				var indexAllQueues = checkForQueueSlicePlayers(allQueues, queuePlayersSlice)
-				if indexAllQueues == -1 {
-
-					gId = randomString(5)
-
-					allQueues = append(allQueues,
-						gameQueue{GameId: gId, Players: queuePlayersSlice[:10]},
-					)
-
-				} else {
-					gId = allQueues[indexAllQueues].GameId
-					fmt.Println("sending this gameid:", gId)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			stateMu.Lock()
+			username, _ := getSession(r.Context().Value("session_id").(string))["username"].(string)
+			gID := ""
+			for _, q := range allQueues {
+				if findIndexByUsername(q.Players, username) != -1 {
+					gID = q.GameId
+					break
 				}
-
-				fmt.Fprintf(w, "data: %s\n\n", fmt.Sprint("MATCH FOUND:"+gId))
-				w.(http.Flusher).Flush()
-
-				i = 11
-				break
 			}
-			fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf("InQueue %d", i))
-			time.Sleep(500 * time.Millisecond)
+			if gID == "" && findIndexByUsername(queuePlayersSlice, username) != -1 {
+				available := make([]queuePlayers, 0, 10)
+				for _, player := range queuePlayersSlice {
+					reserved := false
+					for _, q := range allQueues {
+						if findIndexByUsername(q.Players, player.username) != -1 {
+							reserved = true
+							break
+						}
+					}
+					if !reserved {
+						available = append(available, player)
+					}
+					if len(available) == 10 {
+						break
+					}
+				}
+				if len(available) == 10 {
+					gID = randomString(5)
+					allQueues = append(allQueues, gameQueue{GameId: gID, Players: available})
+				}
+			}
+			stateMu.Unlock()
+			if gID != "" {
+				fmt.Fprintf(w, "data: MATCH FOUND:%s\n\n", gID)
+				w.(http.Flusher).Flush()
+				return
+			}
+			fmt.Fprint(w, "data: InQueue 0\n\n")
 			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+			}
 		}
-
-		ctx := r.Context
-		<-ctx().Done()
 	}))
 
-	if PORT == "" {
-		PORT = "3000"
-	}
-
-	log.Printf("Starting server on %s:%s", ADDR, PORT)
-
-	fmt.Println(ADDR + ":" + PORT)
-	http.ListenAndServe(ADDR+":"+PORT, mux)
+	return &trackerServer{handler: mux, queuePlayers: &queuePlayersSlice}
 }
