@@ -223,3 +223,52 @@ No hosted URL is configured in the repository, so local success does not verify
 your host, domain, proxy, database configuration or an actual container restart.
 Run the staging command after deployment, and keep server request/error logs
 available while trying a real session from separate home/mobile connections.
+
+### Recording the portfolio demonstration
+
+```powershell
+.\scripts\record-showcase.ps1
+```
+
+This builds the frontend and runs a complete BO3 setup with ten isolated browser
+sessions and a disposable local database. It records the actual player screens,
+follows one captain after matchmaking, shows their mouse movements and clicks, adds chapter
+captions, and exports a silent H.264 MP4 at 30 fps
+to `.visual-runs/portfolio/valorant-tracker-demo.mp4`, with a poster image beside it.
+The first run installs `ffmpeg-static` into the ignored `.visual-runs/video-tools`
+directory. As with the visual tests, pass `-PostgresBin` if PostgreSQL is not
+discovered automatically. Recordings and temporary frames stay out of Git.
+The recording pointer is injected only into showcase browser sessions. It stays
+where a click occurred, so any hover styling has a visible cause. Draft players,
+map choices, starting sides, click positions, and decision delays vary in the
+showcase; ordinary verification runs retain their deterministic selections.
+Frame metadata checks that the view stays with the same captain after matchmaking.
+
+To control a captain yourself while the other nine clients play automatically:
+
+```powershell
+.\scripts\record-showcase.ps1 -ManualCaptain
+```
+
+Matchmaking and acceptance are prepared automatically. The selected Team 1
+captain's window is brought forward, and the other player windows are minimized.
+Make draft selections in this window, submit a BO3 vote, and choose maps and sides
+when prompted. Normal voting and side-selection timers still apply. This take
+starts in the captain's lobby, stays in that same browser, and exports automatically
+after match setup completes. Do not click the other clients or leave the lobby
+during the take. `-SkipBuild` reuses the last visual frontend build.
+
+The manual waiting paths can be checked without a person by setting
+`VISUAL_SHOWCASE=1` and `VISUAL_MANUAL_CAPTAIN=1`, then running the visual launcher
+with `-Verify -Headless -Format bo3`. Only that verification mode enables a separate
+UI driver to stand in for the human captain; regular manual recording does not
+automate your selections.
+
+Map banners are bundled in `FrontEnd/public/images/maps/` at 1800 pixels wide
+and displayed at 300 by 50 pixels, retaining detail on high-resolution screens.
+Existing 1800 by 299 crops are preserved from the supplied `Valorant Maps/300x50`
+folder; Corrode and Summit were center-cropped to 1800 by 300 from the supplied
+full-size images. The source files outside the project are unchanged.
+Both the server and frontend use Abyss, Bind, Corrode, Haven, Lotus, Summit, and
+Sunset. The integration flow checks this pool for BO1, BO2, and BO3, and the
+browser flow checks that every active banner is served as a high-resolution PNG.

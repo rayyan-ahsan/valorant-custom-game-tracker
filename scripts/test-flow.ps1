@@ -91,7 +91,7 @@ try {
         $visualLog = Join-Path $projectRoot '.visual-runs/server.log'
         & go test -v -run '^TestVisualBrowser$' -count=1 -timeout=0 . 2>&1 |
             Tee-Object -FilePath $visualLog |
-            Where-Object { "$_" -match 'CONTROL PANEL:|Screenshots and report:|Creating ten isolated|^PASS:|^FAILED:|^--- (PASS|FAIL)|visual_test.go:|^FAIL|^ok\s' }
+            Where-Object { "$_" -match 'CONTROL PANEL:|Screenshots and report:|Creating ten isolated|^YOUR CAPTAIN:|^YOUR TURN:|^PASS:|^FAILED:|^--- (PASS|FAIL)|visual_test.go:|^FAIL|^ok\s' }
     } elseif ($WithoutRace) {
         & go test "-count=$Repeat" -timeout=300s .
     } else {

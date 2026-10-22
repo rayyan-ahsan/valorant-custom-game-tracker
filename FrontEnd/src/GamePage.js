@@ -87,7 +87,7 @@ function killLobby(gameId, username){
 }
 
 //const initialPlayers = [['rayyan',0,0], ['MistaDong',0,0], ['iMaple',0,0], ['Allie',0,0], ['Ria',0,0], ['Chi',0,0], ['TenZ',0,0], ['Vincent',0,0], ['Jordan',0,0], ['Evan',0,0]];
-const initialMaps = [['Abyss', 0, 0] , ['Ascent',0,0], ['Bind',0,0], ['Haven',0,0], ['Icebox',0,0], ['Lotus',0,0], ['Sunset',0,0]];
+const initialMaps = ['Abyss', 'Bind', 'Corrode', 'Haven', 'Lotus', 'Summit', 'Sunset'].map(name => [name, 0, 0]);
 
 function GamePage() {
   const [players, setPlayers] = useState([]);
@@ -540,21 +540,22 @@ function GamePage() {
 
   const getMapImage = (mapName) => {
     const mapImages = {
-      'Abyss': 'https://images2.imgbox.com/48/64/6BUhB8Oj_o.png',
-      'Ascent': 'https://images2.imgbox.com/66/9a/I9toTyBk_o.png',
-      'Bind': 'https://images2.imgbox.com/91/87/seyjTXY5_o.png',
-      'Lotus': 'https://images2.imgbox.com/18/5a/0oc7LF5r_o.png',
-      'Breeze': 'https://images2.imgbox.com/13/22/986ZafWv_o.png',
-      'Fracture': 'https://images2.imgbox.com/9c/12/qH4i0PIi_o.png',
-      'Pearl': 'https://images2.imgbox.com/6a/82/bMVkfOLQ_o.png',
-      'Haven': 'https://images2.imgbox.com/04/cf/qbxEIa4t_o.png',
-      'Icebox': 'https://images2.imgbox.com/79/fe/TI4tw5hG_o.png',
-      'Split': 'https://images2.imgbox.com/d4/ad/SOEGTAek_o.png',
-      'Sunset': 'https://images2.imgbox.com/af/5d/diCaG56c_o.png',
-      // add all your maps here
+      'Abyss': '/images/maps/abyss.png',
+      'Ascent': '/images/maps/ascent.png',
+      'Bind': '/images/maps/bind.png',
+      'Corrode': '/images/maps/corrode.png',
+      'Lotus': '/images/maps/lotus.png',
+      'Breeze': '/images/maps/breeze.png',
+      'Fracture': '/images/maps/fracture.png',
+      'Pearl': '/images/maps/pearl.png',
+      'Haven': '/images/maps/haven.png',
+      'Icebox': '/images/maps/icebox.png',
+      'Split': '/images/maps/split.png',
+      'Summit': '/images/maps/summit.png',
+      'Sunset': '/images/maps/sunset.png',
     };
   
-    return mapImages[mapName] || 'default_image_url';
+    return mapImages[mapName] || '';
   };
 
   const handleMapAction = async (mapName) => {

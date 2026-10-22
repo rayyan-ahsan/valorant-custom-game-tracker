@@ -376,6 +376,15 @@ func TestTenPlayerFlow(t *testing.T) {
 				if veto.Phase == "done" {
 					break
 				}
+				if step == 0 {
+					var names []string
+					for _, m := range veto.MapList {
+						names = append(names, m.Name)
+					}
+					if got := strings.Join(names, ","); got != "Abyss,Bind,Corrode,Haven,Lotus,Summit,Sunset" {
+						t.Fatalf("unexpected map pool: %s", got)
+					}
+				}
 				team := 1
 				if veto.Team == "2" {
 					team = 2

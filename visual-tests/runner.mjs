@@ -16,12 +16,74 @@ const accountPrefix = staging ? `V${randomBytes(3).toString('hex')}` : 'Visual';
 const accountPassword = staging ? randomBytes(18).toString('hex') : 'visual-test-password';
 const headless = process.env.VISUAL_HEADLESS === '1';
 const verify = process.env.VISUAL_VERIFY === '1';
+const showcase = process.env.VISUAL_SHOWCASE === '1';
+const manualCaptain = showcase && process.env.VISUAL_MANUAL_CAPTAIN === '1';
 const format = process.env.VISUAL_FORMAT || 'bo1';
 const channel = process.env.VISUAL_BROWSER || 'msedge';
 const token = randomBytes(24).toString('hex');
 const output = path.resolve('.visual-runs', `run-${Date.now()}`);
 await mkdir(output, { recursive: true });
 const players = [];
+const recording = { frames: [], chapters: [], started: 0, fps: 30 };
+const captureSessions = new WeakMap();
+const mousePositions = new WeakMap();
+let camera, showcaseCaptain, humanCaptain, captureTimer, captureBusy = false;
+let manualDriver;
+const choose = items => items[Math.floor(Math.random() * items.length)];
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function movePointer(page, x, y) {
+  const start = mousePositions.get(page) || { x: 1040, y: 650 };
+  for (let step = 1; step <= 18; step++) {
+    const progress = step / 18;
+    const eased = progress * progress * (3 - 2 * progress);
+    await page.mouse.move(start.x + (x - start.x) * eased, start.y + (y - start.y) * eased);
+    await pause(1000 / 60);
+  }
+  mousePositions.set(page, { x, y });
+}
+async function parkPointer(page) {
+  if (!showcase) return;
+  await movePointer(page, 1040, 650);
+  assert.equal(await page.locator('.map-container:hover').count(), 0, 'Parked cursor must not enlarge a map');
+}
+async function showcaseClick(page, locator) {
+  if (!showcase || page !== camera) return locator.click();
+  await locator.waitFor({ state: 'visible' });
+  const box = await locator.boundingBox();
+  assert(box, 'Recorded click target must have bounds');
+  await movePointer(page, box.x + box.width * (0.35 + Math.random() * 0.3), box.y + box.height * (0.35 + Math.random() * 0.3));
+  await pause(200 + Math.random() * 350);
+  await page.mouse.down();
+  await pause(140);
+  await page.mouse.up();
+  await pause(180);
+  // Leave the visible pointer where the click occurred, without a corner reset.
+}
+async function chapter(title, detail) {
+  if (!showcase) return;
+  recording.chapters.push({ at: (Date.now() - recording.started) / 1000, title, detail });
+  await pause(1600);
+}
+async function captureFrame() {
+  if (captureBusy || !camera) return;
+  captureBusy = true;
+  try {
+    const file = `frame-${String(recording.frames.length).padStart(6, '0')}.jpg`;
+    const at = (Date.now() - recording.started) / 1000;
+    const page = camera;
+    let session = captureSessions.get(page);
+    if (!session) {
+      session = await page.context().newCDPSession(page);
+      captureSessions.set(page, session);
+    }
+    // Capture directly, without Playwright screenshot's animation-frame waits.
+    const { data } = await session.send('Page.captureScreenshot', {
+      format: 'jpeg', quality: 88, fromSurface: true, optimizeForSpeed: true,
+    });
+    await writeFile(path.join(output, file), Buffer.from(data, 'base64'));
+    recording.frames.push({ file, at, player: players.find(p => p.page === page)?.name });
+  } finally { captureBusy = false; }
+}
 const log = [];
 let stage = 0, busy = false, playing = false, stopped = false, ended = false, error = '', dashboard;
 let resolveStop;
@@ -82,13 +144,20 @@ async function queueAndAccept() {
     await poll(() => players[0].page.locator('#queueBtn').evaluate(button => button.classList.contains('disabled')), 'queue restored after refresh');
     await players[9].page.getByRole('button', { name: 'Join Queue', exact: true }).click();
     note('PASS: refresh while queued retained the same player and recovered the queue.');
+  } else if (showcase) {
+    await showcaseClick(players[0].page, players[0].page.getByRole('button', { name: 'Join Queue', exact: true }));
+    await Promise.all(players.slice(1).map(p => p.page.getByRole('button', { name: 'Join Queue', exact: true }).click()));
   } else await Promise.all(players.map(async p => {
     await p.page.getByRole('button', { name: 'Join Queue', exact: true }).click();
     p.status = 'Waiting for match';
   }));
   await Promise.all(players.map(p => p.page.locator('#acceptBtn').waitFor({ state: 'visible' })));
+  await chapter('02 / Match found', 'All ten players must accept before a lobby is created.');
   note('All ten players accept the match.');
-  await Promise.all(players.map(p => p.page.locator('#acceptBtn').click()));
+  if (showcase) {
+    await Promise.all(players.slice(1).map(p => p.page.locator('#acceptBtn').click()));
+    await showcaseClick(players[0].page, players[0].page.locator('#acceptBtn'));
+  } else await Promise.all(players.map(p => p.page.locator('#acceptBtn').click()));
   await Promise.all(players.map(p => p.page.waitForURL(/\/game#\w{5}$/)));
   const id = gameID();
   const rows = await poll(async () => { const rows = await lobby(); return rows.length === 10 && players.every(p => rows.some(row => row.Username === p.name)) && rows; }, 'ten unique lobby players');
@@ -100,6 +169,19 @@ async function queueAndAccept() {
     p.status = 'In lobby';
   }));
   note(`One match (${id}), ten distinct sessions, two captains.`);
+  if (showcase) {
+    showcaseCaptain = captain(rows, 1);
+    // One explicit cut after matchmaking, then a fixed captain perspective.
+    camera = showcaseCaptain.page;
+    recording.captain = showcaseCaptain.name;
+    await parkPointer(camera);
+    if (manualCaptain) {
+      humanCaptain = showcaseCaptain;
+      humanCaptain.page.setDefaultTimeout(600000);
+      note(`YOUR CAPTAIN: ${humanCaptain.name}. Draft players, vote, and select maps/sides. The other nine clients play automatically.`);
+      await humanCaptain.page.evaluate(name => { document.title = `${name} · YOUR CAPTAIN`; }, humanCaptain.name);
+    }
+  }
 }
 async function disconnectPlayer(p) {
   await p.context.setOffline(true);
@@ -120,6 +202,7 @@ async function reconnectPlayer(p) {
   if (staging) await p.page.goto(`${baseURL}/game#${gameID()}`, { waitUntil: 'domcontentloaded' });
 }
 async function draftAndVote() {
+  await chapter('03 / Captain draft', 'Captains take turns selecting players to form two teams of five.');
   let observer;
   if (resilience) {
     const rows = await lobby();
@@ -131,12 +214,19 @@ async function draftAndVote() {
   }
   for (let pick = 0; pick < 8; pick++) {
     const rows = await lobby();
-    const selected = rows.find(p => p.Team === 0);
+    const available = rows.filter(p => p.Team === 0);
+    const selected = showcase ? choose(available) : available[0];
     if (!selected) break;
     const one = rows.filter(p => p.Team === 1).length;
     const two = rows.filter(p => p.Team === 2).length;
     const team = (one === 1 && two === 1) || (one < 4 && two === 3) || (one === 4 && two === 4) ? 1 : 2;
     const p = captain(rows, team);
+    if (showcase) await pause(700 + Math.random() * 900);
+    if (p === humanCaptain) {
+      note(`YOUR TURN: ${p.name}, choose a player for team ${team}.`);
+      await poll(async () => (await lobby()).filter(row => row.Team === 0).length < available.length, 'your player selection', 600000);
+      continue;
+    }
     note(`${p.name} drafts ${selected.Username} for team ${team}.`);
     if (resilience && pick === 0) {
       await p.page.route(`${baseURL}/api/updateteam`, route => route.abort('failed'), { times: 1 });
@@ -145,7 +235,7 @@ async function draftAndVote() {
       assert((await lobby()).some(row => row.Username === selected.Username && row.Team === 0));
       await new Promise(resolve => setTimeout(resolve, 600));
     }
-    await p.page.locator(`[data-testid="draft-${selected.Username}"].selectable`).click();
+    await showcaseClick(p.page, p.page.locator(`[data-testid="draft-${selected.Username}"].selectable`));
     await poll(async () => (await lobby()).some(row => row.Username === selected.Username && row.Team === team), 'draft selection');
     // The application's click debounce is 500 ms, including consecutive picks.
     await new Promise(resolve => setTimeout(resolve, 600));
@@ -168,11 +258,22 @@ async function draftAndVote() {
     note('PASS: a refreshed voter recovered their submitted vote without counting twice.');
   }
   note(`All ten players vote for ${format.toUpperCase()}.`);
+  await chapter('04 / Choose the series', 'Ten independent votes decide the match format.');
   await Promise.all(players.map(async p => {
+    if (p === humanCaptain) return;
     if (await p.page.getByRole('button', { name: 'Submitted', exact: true }).isVisible()) return;
-    await p.page.getByTestId(`vote-${format}`).click();
+    if (showcase && p === showcaseCaptain) await showcaseClick(p.page, p.page.getByTestId(`vote-${format}`));
+    else await p.page.getByTestId(`vote-${format}`).click();
   }));
-  await Promise.all(players.map(async p => { const button = p.page.getByRole('button', { name: 'Submit Vote', exact: true }); if (await button.isVisible()) await button.click(); }));
+  if (showcase) await pause(1800);
+  await Promise.all(players.map(async p => {
+    if (p === humanCaptain) return;
+    const button = p.page.getByRole('button', { name: 'Submit Vote', exact: true });
+    if (await button.isVisible()) {
+      if (showcase && p === showcaseCaptain) await showcaseClick(p.page, button);
+      else await button.click();
+    }
+  }));
   await Promise.all(players.map(p => p.page.getByTestId(`vote-${format}`).waitFor({ state: 'hidden' })));
   await poll(async () => {
     const response = await players[0].context.request.get(`/api/getmapveto?gameId=${gameID()}`);
@@ -182,15 +283,29 @@ async function draftAndVote() {
   note('Both teams have five players. Every client completed voting.');
 }
 async function mapsAndSides() {
+  const expectedMaps = ['Abyss', 'Bind', 'Corrode', 'Haven', 'Lotus', 'Summit', 'Sunset'];
+  assert.deepEqual((await veto()).mapList.map(map => map.Name), expectedMaps);
+  for (const name of expectedMaps) {
+    const response = await players[0].context.request.get(`/images/maps/${name.toLowerCase()}.png`);
+    assert(response.ok(), `${name} banner must load from the app`);
+    const bytes = await response.body();
+    assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', `${name} must be a PNG`);
+    assert.equal(bytes.readUInt32BE(16), 1800, `${name} source width`);
+    // Existing supplied crops are 299 px high; new crops are exactly 300 px.
+    assert([299, 300].includes(bytes.readUInt32BE(20)), `${name} source height`);
+  }
+  await chapter('05 / Maps and starting sides', 'Captains ban and pick maps, then choose attack or defense.');
   const rows = await lobby();
   for (let i = 0; i < 7; i++) {
     const state = await veto();
     if (state.mapPhase === 'done') break;
     const team = Number(state.mapTeam);
     const p = captain(rows, team);
-    const map = state.mapList.find(m => m.Action === 0);
+    if (showcase) await pause(700 + Math.random() * 900);
+    const available = state.mapList.filter(m => m.Action === 0);
+    let map = showcase ? choose(available) : available[0];
     assert(map, 'There must be an available map');
-    note(`${p.name}: ${state.mapPhase} ${map.Name}.`);
+    if (p !== humanCaptain) note(`${p.name}: ${state.mapPhase} ${map.Name}.`);
     if (resilience && i === 0) {
       await p.page.route(`${baseURL}/api/updatemap`, route => route.abort('failed'), { times: 1 });
       await p.page.getByTestId(`map-${map.Name}`).click();
@@ -198,11 +313,19 @@ async function mapsAndSides() {
       assert((await veto()).mapList.some(m => m.Name === map.Name && m.Action === 0));
       await new Promise(resolve => setTimeout(resolve, 400));
     }
-    await p.page.getByTestId(`map-${map.Name}`).click();
+    if (p === humanCaptain) {
+      note(`YOUR TURN: ${p.name}, ${state.mapPhase} a map.`);
+      map = await poll(async () => {
+        const current = await veto();
+        return current.mapList.find(m => m.Action !== 0 && available.some(old => old.Name === m.Name));
+      }, 'your map selection', 600000);
+    } else await showcaseClick(p.page, p.page.getByTestId(`map-${map.Name}`));
     await poll(async () => (await veto()).mapList.some(m => m.Name === map.Name && m.Action !== 0), 'map choice');
     if (state.mapPhase === 'pick') {
       const opponent = captain(rows, team === 1 ? 2 : 1);
-      note(`${opponent.name} chooses Attack on ${map.Name}.`);
+      if (showcase) await pause(700 + Math.random() * 900);
+      const side = showcase ? choose(['Attack', 'Defense']) : 'Attack';
+      note(`${opponent.name} chooses a side on ${map.Name}.`);
       if (resilience && !opponent.sideRefreshTested) {
         await opponent.page.getByRole('button', { name: 'Attack', exact: true }).waitFor();
         await opponent.page.reload({ waitUntil: 'domcontentloaded' });
@@ -214,7 +337,8 @@ async function mapsAndSides() {
         await opponent.page.getByRole('alert').filter({ hasText: 'Could not select your side' }).waitFor();
         opponent.sideFailureTested = true;
       }
-      await opponent.page.getByRole('button', { name: 'Attack', exact: true }).click();
+      if (opponent !== humanCaptain) await showcaseClick(opponent.page, opponent.page.getByRole('button', { name: side, exact: true }));
+      else note('YOUR TURN: choose Attack, Defense, or Random.');
       await opponent.page.getByRole('button', { name: 'Attack', exact: true }).waitFor({ state: 'hidden' });
     }
     await new Promise(resolve => setTimeout(resolve, 600));
@@ -294,7 +418,7 @@ async function bounds(page, value) {
   } finally { await cdp.detach(); }
 }
 async function tile() {
-  if (headless) return;
+  if (headless || showcase) return;
   const screen = await players[0].page.evaluate(() => ({ width: window.screen.availWidth, height: window.screen.availHeight }));
   const windows = await Promise.all(players.map((p, i) => bounds(p.page, {
     left: Math.floor(i % 5 * screen.width / 5), top: Math.floor(Math.floor(i / 5) * screen.height / 2),
@@ -347,7 +471,24 @@ const panel = http.createServer(async (req, res) => {
 try {
   note('Creating ten isolated browser sessions.');
   for (let i = 0; i < 10; i++) {
-    const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: !staging, viewport: headless ? { width: 1200, height: 800 } : null });
+    const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: !staging, viewport: showcase ? { width: 1280, height: 800 } : headless ? { width: 1200, height: 800 } : null });
+    if (showcase) await context.addInitScript(() => {
+      // Browser screenshots omit the OS pointer. Show a recording-only pointer
+      // driven by real mouse events, without intercepting application input.
+      document.addEventListener('DOMContentLoaded', () => {
+        const pointer = document.createElement('div');
+        pointer.id = 'showcase-pointer';
+        pointer.style.cssText = 'position:fixed;left:0;top:0;width:23px;height:30px;pointer-events:none;z-index:2147483647;display:none;filter:drop-shadow(1px 2px 2px #000)';
+        pointer.innerHTML = '<svg width="23" height="30" viewBox="0 0 23 30"><path d="M2 2 L2 24 L8 18 L13 28 L17 26 L12 16 L21 16 Z" fill="white" stroke="#111" stroke-width="1.5"/></svg>';
+        document.body.append(pointer);
+        document.addEventListener('mousemove', event => {
+          pointer.style.display = 'block';
+          pointer.style.transform = `translate(${event.clientX}px,${event.clientY}px)`;
+        });
+        document.addEventListener('mousedown', () => { pointer.style.filter = 'drop-shadow(0 0 5px #ff5b69)'; });
+        document.addEventListener('mouseup', () => { pointer.style.filter = 'drop-shadow(1px 2px 2px #000)'; });
+      });
+    });
     if (resilience) {
       let requestNumber = 0;
       // Delay request dispatch, including streaming reconnects. Do not buffer
@@ -375,6 +516,7 @@ try {
     await p.page.getByRole('button', { name: 'Join Queue', exact: true }).waitFor();
     assert.equal((await json(p, '/api/user')).username, p.name);
     p.status = 'Ready to queue';
+    if (showcase) await parkPointer(p.page);
   }));
   assert.equal(new Set((await Promise.all(players.map(p => p.context.cookies()))).flat().filter(c => c.name === 'session_id').map(c => c.value)).size, 10);
   await tile();
@@ -399,7 +541,64 @@ try {
   dashboard.on('close', () => { stopped = true; playing = false; resolveStop(); });
   await dashboard.goto(panelURL);
   await dashboard.screenshot({ path: path.join(output, 'dashboard.png') });
-  if (verify) {
+  if (showcase) {
+    if (manualCaptain) {
+      // Start the manual take in an actual captain's lobby. Captain assignment
+      // stays random in the real app; no production rules are changed.
+      await queueAndAccept();
+      recording.chapters = [];
+      recording.manual = true;
+      stage = 1;
+      await dashboard.evaluate(name => {
+        for (const id of ['play', 'next', 'pause', 'tile', 'cleanup']) document.getElementById(id).disabled = true;
+        document.querySelector('h1').textContent = `You are ${name}, Team 1 captain`;
+        document.querySelector('header p').textContent = 'Use your captain window to draft players, submit a BO3 vote, and select maps or sides when prompted. The other nine clients play automatically. Your video saves after match setup finishes. Normal voting and side-selection timers still apply.';
+      }, humanCaptain.name);
+      if (!headless) {
+        await Promise.all(players.filter(p => p !== humanCaptain).map(p => bounds(p.page, { windowState: 'minimized' })));
+        await bounds(humanCaptain.page, { left: 30, top: 30, width: 1320, height: 920 });
+        await humanCaptain.page.bringToFront();
+      }
+      if (verify) {
+        const { exerciseManualCaptain } = await import('./manual-captain-check.mjs');
+        manualDriver = exerciseManualCaptain(humanCaptain.page, format, () => stopped || stage === 3).catch(e => {
+          error = e.message; stopped = true;
+        });
+      }
+    }
+    recording.started = Date.now();
+    camera = showcaseCaptain?.page || players[0].page;
+    captureTimer = setInterval(() => { void captureFrame().catch(e => { error = e.message; }); }, 1000 / recording.fps);
+    await chapter('VALORANT / Custom Game Tracker', 'A complete match setup with ten isolated browser sessions.');
+    await pause(2500);
+    if (!manualCaptain) {
+      await chapter('01 / Join the queue', 'Ten signed-in players join the same matchmaking queue.');
+      await next();
+      if (error) throw new Error(error);
+    }
+    await next();
+    if (error) throw new Error(error);
+    await next();
+    if (error) throw new Error(error);
+    await chapter('06 / Ready to play', 'Both teams share the same selected maps and starting sides.');
+    if (manualDriver) {
+      const actions = await manualDriver;
+      assert(actions && Object.values(actions).every(count => count > 0), 'Manual driver must draft, vote, select maps, and choose sides');
+      note('PASS: manual captain completed every action through the UI; nine other clients played automatically.');
+    }
+    await pause(5500);
+    await chapter('One flow. Ten clients.', 'Queue / Accept / Draft / Vote / Map veto / Ready');
+    await pause(3500);
+    // Validate cleanup after recording the finished lobby.
+    clearInterval(captureTimer);
+    while (captureBusy) await pause(50);
+    const captainStart = recording.frames.findIndex(frame => frame.player === recording.captain);
+    assert(captainStart >= 0, 'Recording must include the captain');
+    assert(recording.frames.slice(captainStart).every(frame => frame.player === recording.captain), 'Camera must stay on one captain after matchmaking');
+    camera = null;
+    await endLobby();
+    stopped = true; resolveStop();
+  } else if (verify) {
     // Exercise the control panel itself as well as the ten player pages.
     await dashboard.getByRole('button', { name: 'Tile player windows', exact: true }).click();
     await dashboard.getByRole('button', { name: 'Focus player', exact: true }).first().click();
@@ -426,6 +625,12 @@ try {
 } finally {
   stopped = true; playing = false;
   clearInterval(statusTimer);
+  clearInterval(captureTimer);
+  while (captureBusy) await pause(50);
+  if (showcase) {
+    await writeFile(path.join(output, 'recording.json'), JSON.stringify(recording, null, 2));
+    console.log(`RECORDING: ${output}`);
+  }
   await writeFile(path.join(output, 'report.json'), JSON.stringify(snapshot(), null, 2));
   await browser.close();
   panel.closeAllConnections();

@@ -1688,11 +1688,11 @@ func newTrackerServerWithAssets(db *sql.DB, assets string) *trackerServer {
 	baseMaps := make([]mapList, 0, 7)
 	baseMaps = append(baseMaps,
 		mapList{Name: "Abyss", Team: 0, Action: 0},
-		mapList{Name: "Ascent", Team: 0, Action: 0},
 		mapList{Name: "Bind", Team: 0, Action: 0},
+		mapList{Name: "Corrode", Team: 0, Action: 0},
 		mapList{Name: "Haven", Team: 0, Action: 0},
-		mapList{Name: "Icebox", Team: 0, Action: 0},
 		mapList{Name: "Lotus", Team: 0, Action: 0},
+		mapList{Name: "Summit", Team: 0, Action: 0},
 		mapList{Name: "Sunset", Team: 0, Action: 0},
 	)
 	//queuePlayersAccepted := make([]int, 0, 10)
