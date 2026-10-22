@@ -1,7 +1,8 @@
 param(
     [string]$PostgresBin,
     [ValidateRange(1, 100)][int]$Repeat = 1,
-    [switch]$WithoutRace
+    [switch]$WithoutRace,
+    [switch]$Visual
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,15 +21,22 @@ function Invoke-TestPgCtl([string]$Arguments) {
     $stderr = Join-Path $testDirectory "pgctl-$logID.err.log"
     $process = Start-Process -FilePath $pgCtl -ArgumentList $Arguments -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    # Windows PowerShell 5.1 can lose ExitCode after Start-Process unless its
+    # native process handle is cached before waiting. PowerShell 7 hid this bug.
+    $null = $process.Handle
     $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    if ($null -eq $exitCode) {
+        throw "Could not read PostgreSQL's exit code. See $stdout and $stderr"
+    }
     Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
     Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-    return $process.ExitCode
+    return [int]$exitCode
 }
 
 Push-Location -LiteralPath $projectRoot
 try {
-    if (-not $WithoutRace) {
+    if (-not $WithoutRace -and -not $Visual) {
         $compiler = Get-Command gcc -ErrorAction SilentlyContinue
         if (-not $compiler) { throw 'Go race tests need GCC on PATH. Install a MinGW compiler, or use -WithoutRace to run only the integration checks.' }
         # Keep the compiler's DLLs ahead of unrelated DLLs installed by other apps.
@@ -79,10 +87,15 @@ try {
     # All application tests are in the root Go package. Avoid traversing the
     # frontend's dependency tree or the ignored historical mock server.
     Write-Output "Running the application tests $Repeat time(s)."
-    if ($WithoutRace) {
-        & go test "-count=$Repeat" -timeout=180s .
+    if ($Visual) {
+        $visualLog = Join-Path $projectRoot '.visual-runs/server.log'
+        & go test -v -run '^TestVisualBrowser$' -count=1 -timeout=0 . 2>&1 |
+            Tee-Object -FilePath $visualLog |
+            Where-Object { "$_" -match 'CONTROL PANEL:|Screenshots and report:|Creating ten isolated|^PASS:|^FAILED:|^--- (PASS|FAIL)|visual_test.go:|^FAIL|^ok\s' }
+    } elseif ($WithoutRace) {
+        & go test "-count=$Repeat" -timeout=300s .
     } else {
-        & go test -race "-count=$Repeat" -timeout=180s .
+        & go test -race "-count=$Repeat" -timeout=300s .
     }
     $testExitCode = $LASTEXITCODE
 } finally {

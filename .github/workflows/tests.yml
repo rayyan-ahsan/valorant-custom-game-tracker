@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race . -count=10 -timeout=180s
+      - run: go test -race . -count=10 -timeout=300s
 
   frontend:
     runs-on: ubuntu-latest
@@ -50,3 +50,61 @@ jobs:
       - run: npm test -- --watchAll=false --runInBand
         env:
           CI: 'true'
+
+  visual-browser-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [bo1, bo2, bo3]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tracker_visual_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tracker_visual_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/tracker_visual_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: FrontEnd
+      - run: npm ci
+        working-directory: visual-tests
+      - run: npx playwright install --with-deps chromium
+        working-directory: visual-tests
+      - run: npm run build
+        working-directory: FrontEnd
+        env:
+          CI: 'false'
+          BUILD_PATH: ${{ github.workspace }}/.visual-runs/build
+      - run: go test -v -run '^TestVisualBrowser$' -count=1 -timeout=180s .
+        env:
+          VISUAL_TEST: '1'
+          VISUAL_HEADLESS: '1'
+          VISUAL_VERIFY: '1'
+          VISUAL_RESILIENCE: '1'
+          VISUAL_BROWSER: chromium
+          VISUAL_FORMAT: ${{ matrix.format }}
+          VISUAL_ASSET_DIR: ${{ github.workspace }}/.visual-runs/build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: visual-${{ matrix.format }}
+          path: .visual-runs/run-*/
+          retention-days: 3

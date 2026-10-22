@@ -33,3 +33,5 @@ maindb.tar
 # Local test databases and test runner caches
 /.test-postgres/
 /FrontEnd/.jest-cache/
+/.visual-runs/
+/visual-tests/node_modules/

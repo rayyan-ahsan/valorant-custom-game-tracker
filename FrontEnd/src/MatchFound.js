@@ -27,6 +27,7 @@ function MatchFound({ show, handleClose, username, gameId, socket }) {
   
 
   useEffect(() => {
+    if (!show || !username || !gameId) return;
     //if(matchAcceptedEventSource && gameId){
       const modalBodyAccepted = new EventSource("/api/matchaccepters")
       console.log("matchaccepted is open")
@@ -54,7 +55,7 @@ function MatchFound({ show, handleClose, username, gameId, socket }) {
         .then(data => {
           console.log("redirecting :3 :", data)
           if(/REDIRECT GameId:/.test(data)) {
-            socket.close()
+            socket?.close()
             navigate('/game#'+gameId)
           }
         })
@@ -76,7 +77,7 @@ function MatchFound({ show, handleClose, username, gameId, socket }) {
         modalBodyAccepted.close()
       }
     }
-  }, [username, gameId, navigate]);
+  }, [show, username, gameId, navigate, socket]);
 
   useEffect(() => {
     let timerId;

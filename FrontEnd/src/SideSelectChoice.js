@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import ProgressBar from 'react-bootstrap/ProgressBar';
 import Button from 'react-bootstrap/Button';
 import Modal from 'react-bootstrap/Modal';
@@ -8,11 +8,14 @@ function SideSelectModal({ show, setShow, gameId, team, mapName }) {
   const [timer, setTimer] = useState(15);
   const [sideSelected, setSideSelected] = useState(false)
   const [fetchInProgress, setFetchInProgress] = useState(false)
+  const [error, setError] = useState('');
+  const submitting = useRef(false);
 
   function sendSideSelect(side) {
-    if (sideSelected || fetchInProgress) return;
+    if (sideSelected || submitting.current) return;
 
-    setSideSelected(true);
+    submitting.current = true;
+    setError('');
     setFetchInProgress(true);
 
     console.log("Selecting side:", side);
@@ -28,51 +31,56 @@ function SideSelectModal({ show, setShow, gameId, team, mapName }) {
         mapName: mapName,
       }),
     })
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error('Side selection failed');
+        return res.json();
+      })
       .then((data) => {
         console.log("side selected successfully", data);
+        setSideSelected(true);
         setShow(false);
       })
       .catch((err) => {
         console.log("error in side select:", err);
-        setShow(false);
+        setError('Could not select your side. Please try again.');
       })
       .finally(() => {
         setFetchInProgress(false); // Reset fetch in progress
+        submitting.current = false;
       });
   }
 
   useEffect(() => {
     if (!show) {
       // Reset timer when modal is hidden
-      setTimer(10);
+      setTimer(15);
       setSideSelected(false);
       setFetchInProgress(false);
       return;
     }
 
-    if (sideSelected || fetchInProgress) return; // Avoid setting interval if a side is selected or fetch is in progress
+    if (sideSelected || fetchInProgress || error) return;
 
     const countdown = setInterval(() => {
       setTimer((prev) => {
-        if (prev <= 1) {
-          const Random = Math.floor(Math.random() * 2) + 1
-          clearInterval(countdown);
-          if (!sideSelected) {
-            sendSideSelect(Random);
-            setSideSelected(true)
-          }
-          setShow(false);
-          return 0;
-        }
-        return prev - 1;
+        return Math.max(0, prev - 1);
       });
     }, 1000);
 
     return () => {
       clearInterval(countdown);
     };
-  }, [show, sideSelected, fetchInProgress, gameId]);
+  }, [show, sideSelected, fetchInProgress, gameId, error]);
+
+  useEffect(() => {
+    if (show && timer === 0 && !sideSelected && !fetchInProgress && !error) {
+      sendSideSelect(Math.floor(Math.random() * 2) + 1);
+    }
+  }, [show, timer, sideSelected, fetchInProgress, error]);
+
+  useEffect(() => {
+    setTimer(15); setSideSelected(false); setError('');
+  }, [mapName]);
 
   return (
     <Modal show={show} onHide={() => setShow(false)} centered size="md" style={{ border: 'none' }} backdrop="static">
@@ -84,6 +92,7 @@ function SideSelectModal({ show, setShow, gameId, team, mapName }) {
           {`(${timer})`}
         </span>
       </Modal.Header>
+      {error && <div role="alert" className="alert alert-danger">{error}</div>}
       <Modal.Footer className="border-top-0 justify-content-center bg-dark" style={{ borderRadius: '0 0 5px 5px' }}>
       <Button className="btn-danger btnSideSelect" style={{marginRight:"20px"}} onClick={() => {sendSideSelect(1)}}>Attack</Button>
       <Button className="btn-secondary btnSideSelect" style={{marginLeft:"20px", marginRight:"20px"}} onClick={() => {sendSideSelect(Math.floor(Math.random() * 2)+1)}}>Random</Button>

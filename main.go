@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1213,25 +1214,7 @@ func broadcastUpdateLobby(gameId string, lobby []Lobby) {
 
 func broadcastUpdateTeam(gameId string, lobby []Lobby, allVotes *[]boVotes) {
 
-	var team1 = CountPlayersInLobbyStruct(lobby, 1)
-	var team2 = CountPlayersInLobbyStruct(lobby, 2)
-	var currentTeam string
-
-	if team1 == 1 && team2 == 1 {
-		currentTeam = "1"
-	} else if team1 == 2 && team2 < 3 {
-		currentTeam = "2"
-	} else if team1 < 4 && team2 == 3 {
-		currentTeam = "1"
-	} else if team1 == 4 && team2 == 3 {
-		currentTeam = "2"
-	} else if team1 == 4 && team2 == 4 {
-		currentTeam = "1"
-	} else if team1 == 5 && team2 == 4 {
-		currentTeam = "2"
-	} else {
-		currentTeam = "0"
-	}
+	currentTeam := strconv.Itoa(draftTeam(lobby))
 
 	eventMessage := EventMessage{
 		EventType: "currentTeam",
@@ -1387,7 +1370,7 @@ func broadcastUpdateBestOfXVote(gameId string, allVotes *[]boVotes) {
 		fmt.Println("allvotes before append:", *allVotes)
 		var votes []int = []int{0, 0, 0}
 		*allVotes = append(*allVotes,
-			boVotes{GameId: gameId, Votes: votes, Voters: make(map[string]string), Deadline: time.Now().Add(30 * time.Second)},
+			boVotes{GameId: gameId, Votes: votes, Voters: make(map[string]string), Deadline: time.Now().Add(15 * time.Second)},
 		)
 		fmt.Println("allvotes after append:", *allVotes)
 		data, err := json.Marshal("vote time")
@@ -1452,10 +1435,11 @@ var upgrader = websocket.Upgrader{
 }
 
 type PlayerActive struct {
-	conn     *websocket.Conn
-	username string
-	lastPing time.Time
-	mu       sync.Mutex
+	disconnected bool
+	conn         *websocket.Conn
+	username     string
+	lastPing     time.Time
+	mu           sync.Mutex
 }
 
 type mapSide struct {
@@ -1484,10 +1468,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if _, exists := players3[username]; exists {
-		conn.WriteMessage(websocket.TextMessage, []byte("Username already in use"))
-		conn.Close()
-		return
+	if previous := players3[username]; previous != nil {
+		previous.mu.Lock()
+		disconnected := previous.disconnected
+		previous.mu.Unlock()
+		if !disconnected {
+			conn.Close()
+			return
+		}
 	}
 
 	client := &PlayerActive{conn: conn, username: username, lastPing: time.Now()}
@@ -1500,6 +1488,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func handleMessages(client *PlayerActive) {
 	defer func() {
+		client.mu.Lock()
+		client.disconnected = true
+		client.mu.Unlock()
 		client.conn.Close()
 	}()
 
@@ -1553,7 +1544,15 @@ func sweepClients(db *sql.DB, queuePlayersSlice *[]queuePlayers, now time.Time) 
 		inactive := now.Sub(client.lastPing) > 15*time.Second
 		client.mu.Unlock()
 		err := client.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
-		if err == nil && !inactive {
+		if !inactive {
+			// A refresh or brief outage gets the same 15-second grace period as
+			// a missed heartbeat. The replacement connection retains the queue.
+			if err != nil {
+				client.mu.Lock()
+				client.disconnected = true
+				client.mu.Unlock()
+				client.conn.Close()
+			}
 			continue
 		}
 		client.conn.Close()
@@ -1661,6 +1660,10 @@ func (s *trackerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func newTrackerServer(db *sql.DB) *trackerServer {
+	return newTrackerServerWithAssets(db, "./FrontEnd/build")
+}
+
+func newTrackerServerWithAssets(db *sql.DB, assets string) *trackerServer {
 	queuePlayersSlice := make([]queuePlayers, 0, 10)
 	//queuePlayers = append(queuePlayers, "MistaDong", "iMaple", "Allie", "Ria", "Chi", "TenZ", "Vincent", "Jordan", "Evan")
 	/*
@@ -1711,10 +1714,10 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 	// http.FileServer(http.Dir("./FrontEnd/valorant-custom-game-tracker/build"))
 	mux := http.NewServeMux()
 	fmt.Print("Hi we are listening :D")
-	mux.Handle("/", http.FileServer(http.Dir("./FrontEnd/build")))
-	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir("./FrontEnd/build"))))
-	mux.Handle("/login", http.StripPrefix("/login", http.FileServer(http.Dir("./FrontEnd/build"))))
-	mux.Handle("/profile", http.StripPrefix("/profile", http.FileServer(http.Dir("./FrontEnd/build"))))
+	mux.Handle("/", http.FileServer(http.Dir(assets)))
+	mux.Handle("/game", http.StripPrefix("/game", http.FileServer(http.Dir(assets))))
+	mux.Handle("/login", http.StripPrefix("/login", http.FileServer(http.Dir(assets))))
+	mux.Handle("/profile", http.StripPrefix("/profile", http.FileServer(http.Dir(assets))))
 	mux.HandleFunc("/heartbeat", handleWebSocket)
 	//DEBUG PPROF
 	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
@@ -1902,7 +1905,8 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&x)
 		if err != nil {
-			panic(err)
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
 		}
 
 		var action int
@@ -1923,8 +1927,16 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 			return
 		}
 
+		lobbyIndex := checkForGameSliceId(allGames, x.GameId)
+		if lobbyIndex == -1 || !isCaptain(r, allGames[lobbyIndex].Players, x.Team) {
+			http.Error(w, "Only this team's captain can select maps", http.StatusForbidden)
+			return
+		}
+		found := false
+
 		for i := range allMaps[index].mapList {
 			if allMaps[index].mapList[i].Name == x.Map {
+				found = true
 				if previous := allMaps[index].mapList[i]; previous.Action != 0 {
 					if previous.Action == action && previous.Team == x.Team {
 						json.NewEncoder(w).Encode("maps :D")
@@ -1933,10 +1945,22 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 					}
 					return
 				}
+				maps := allMaps[index]
+				turn := checkMapPhaseAndTeam(x.GameId, CountMapValuesInMapStruct(maps.mapList, 1), CountMapValuesInMapStruct(maps.mapList, 2), maps.Format)
+				if turn != x.Action+" "+strconv.Itoa(x.Team) || x.FinalVote != maps.Format {
+					http.Error(w, "Map phase or turn has changed", http.StatusConflict)
+					return
+				}
+
 				allMaps[index].mapList[i].Team = x.Team
 				allMaps[index].mapList[i].Action = action
 				fmt.Println("allMaps maplist before broadcast update: ", allMaps[index].mapList)
 			}
+		}
+
+		if !found {
+			http.Error(w, "Map not found", http.StatusNotFound)
+			return
 		}
 
 		if x.FinalVote == "bo3" {
@@ -1968,7 +1992,8 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&x)
 		if err != nil {
-			panic(err)
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
 		}
 
 		var index = checkForGameSliceId(allGames, x.GameId)
@@ -1977,39 +2002,31 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 			return
 		}
 
-		for i := range allGames[index].Players {
-			if allGames[index].Players[i].Username == x.Username {
-				if allGames[index].Players[i].Team == x.Team {
-					break
-				} else if allGames[index].Players[i].Team != 0 {
-					http.Error(w, "Player has already been drafted", http.StatusConflict)
-					return
-				} else {
-					allGames[index].Players[i].Team = x.Team
-					dbSetTeam(db, x.GameId, x.Username, x.Team)
-					broadcastUpdate(x.GameId, allGames[index].Players, &allVotes)
-					fmt.Println("\n/api/updateteam SENT: ", allGames[index].Players)
-					json.NewEncoder(w).Encode("hewwo uwu")
-				}
-			}
+		players := allGames[index].Players
+		if !isCaptain(r, players, x.Team) {
+			http.Error(w, "Only this team's captain can draft", http.StatusForbidden)
+			return
 		}
-
-		/*
-
-			for i := range lobbyPlayers {
-				if lobbyPlayers[i].Username == x.Username {
-					if lobbyPlayers[i].Team == x.Team {
-						break
-					} else {
-						lobbyPlayers[i].Team = x.Team
-						dbSetTeam(db, x.GameId, x.Username, x.Team)
-						broadcastUpdate(x.GameId, lobbyPlayers)
-						json.NewEncoder(w).Encode("hewwo uwu")
-					}
-				}
+		for i, player := range players {
+			if player.Username != x.Username {
+				continue
 			}
+			if player.Team == x.Team {
+				json.NewEncoder(w).Encode("Player already drafted")
+				return
+			}
+			if player.Team != 0 || draftTeam(players) != x.Team {
+				http.Error(w, "Player unavailable or not your turn", http.StatusConflict)
+				return
+			}
+			allGames[index].Players[i].Team = x.Team
+			dbSetTeam(db, x.GameId, x.Username, x.Team)
+			broadcastUpdate(x.GameId, allGames[index].Players, &allVotes)
+			json.NewEncoder(w).Encode("Player drafted")
+			return
+		}
+		http.Error(w, "Player not found", http.StatusNotFound)
 
-		*/
 	}))
 
 	mux.HandleFunc("/api/sendsideselect", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -2025,6 +2042,36 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 		err := decoder.Decode(&x)
 		if err != nil {
 			http.Error(w, "bad data for side select", http.StatusBadRequest)
+		}
+
+		if err != nil {
+			return
+		}
+		lobbyIndex := checkForGameSliceId(allGames, x.GameId)
+		if lobbyIndex == -1 {
+			http.Error(w, "Lobby not found", http.StatusNotFound)
+			return
+		}
+		if !isCaptain(r, allGames[lobbyIndex].Players, x.Team) {
+			http.Error(w, "Only this team's captain can select sides", http.StatusForbidden)
+			return
+		}
+		if x.Side != 1 && x.Side != 2 {
+			http.Error(w, "Invalid side", http.StatusBadRequest)
+			return
+		}
+		mapIndex := checkForMapsId(allMaps, x.GameId)
+		allowed := false
+		if mapIndex != -1 {
+			for _, m := range allMaps[mapIndex].mapList {
+				if m.Name == x.MapName && m.Action == 1 && (m.Team == 3 || m.Team != x.Team) {
+					allowed = true
+				}
+			}
+		}
+		if !allowed {
+			http.Error(w, "Only the opposing captain selects sides on a picked map", http.StatusConflict)
+			return
 		}
 
 		var attackerTeam int
@@ -2158,29 +2205,30 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 			return
 		}
 
+		session := getSession(r.Context().Value("session_id").(string))
+		if session["gameId"] != g.Id || session["inGame"] != 1 {
+			http.Error(w, "Active lobby membership required", http.StatusForbidden)
+			return
+		}
+
 		allGamesMutex.Lock()
 		defer allGamesMutex.Unlock()
 
 		index := checkForGameSliceId(allGames, g.Id)
 
 		if index == -1 {
-			var lobby []Lobby
-			retryCount := 0
-			maxRetries := 5
-
-			for retryCount < maxRetries {
-				lobby, err = dbGetPlayers(db, g.Id)
-				if err != nil {
-					http.Error(w, "Error fetching players", http.StatusInternalServerError)
-					return
-				}
-
-				if len(lobby) == 10 {
-					break
-				}
-
-				retryCount++
-				time.Sleep(500 * time.Millisecond)
+			// A fast client's first read can beat every /playersinlobby call.
+			// Initialize here while holding stateMu, rather than sleeping with
+			// the lock and preventing those other handlers from making progress.
+			if dbCountHowManyReady(db, g.Id) != 10 {
+				http.Error(w, "Match is not ready", http.StatusConflict)
+				return
+			}
+			dbAddAllPlayersToGame(db, g.Id)
+			lobby, err := dbGetPlayers(db, g.Id)
+			if err != nil {
+				http.Error(w, "Error fetching players", http.StatusInternalServerError)
+				return
 			}
 
 			if len(lobby) != 10 {
@@ -2194,6 +2242,9 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 				allQueues = append(allQueues[:index2], allQueues[index2+1:]...)
 			}
 			index = len(allGames) - 1
+			// Browsers may already have subscribed while the lobby was empty.
+			// Send the initialized roster and first turn on those connections too.
+			broadcastUpdate(g.Id, allGames[index].Players, &allVotes)
 		}
 
 		finalLobby := allGames[index].Players
@@ -2276,6 +2327,20 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 
 	mux.HandleFunc("/api/finalseriesvote", sessionMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		gameId := r.URL.Query().Get("gameId")
+		lobbyIndex := checkForGameSliceId(allGames, gameId)
+		member := false
+		if lobbyIndex != -1 {
+			for _, player := range allGames[lobbyIndex].Players {
+				if player.Username == requestUsername(r) {
+					member = true
+				}
+			}
+		}
+		if !member {
+			http.Error(w, "Lobby membership required", http.StatusForbidden)
+			return
+		}
+
 		if index := checkForMapsId(allMaps, gameId); index != -1 {
 			json.NewEncoder(w).Encode(allMaps[index].Format)
 			return
@@ -2285,6 +2350,11 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 
 		if index == -1 {
 			http.Error(w, "idk how this happened ngl u are ass", http.StatusExpectationFailed)
+			return
+		}
+
+		if len(allVotes[index].Voters) < 10 && time.Now().Before(allVotes[index].Deadline) {
+			http.Error(w, "Voting is still open", http.StatusConflict)
 			return
 		}
 
@@ -2313,6 +2383,8 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 			)
 		}
 
+		broadcastEvent(gameId, fmt.Sprintf("event: format\ndata: %q\n\n", finalVote))
+		broadcastUpdateMaps(gameId, allMaps[checkForMapsId(allMaps, gameId)].mapList, finalVote)
 		json.NewEncoder(w).Encode(finalVote)
 
 	}))
@@ -2351,6 +2423,11 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 		if err != nil {
 			panic(err)
 		}
+		if requestUsername(r) != u.Username || getSession(r.Context().Value("session_id").(string))["gameId"] != u.Id {
+			http.Error(w, "Active lobby membership required", http.StatusForbidden)
+			return
+		}
+
 		//id := u.Id
 		fmt.Println("received :333:" + u.Username)
 
@@ -2494,9 +2571,38 @@ func newTrackerServer(db *sql.DB) *trackerServer {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 		client := &Client{gameId: gameId, ch: make(chan string, 64), cancel: cancel}
+		stateMu.Lock()
+		snapshot := lobbySnapshot{Username: requestUsername(r)}
+		lobbyIndex := checkForGameSliceId(allGames, gameId)
+		session := getSession(r.Context().Value("session_id").(string))
+		// The initial page may connect before /getplayers initializes the lobby.
+		snapshot.Active = session["gameId"] == gameId && session["inGame"] == 1
+		if lobbyIndex != -1 && snapshot.Active {
+			snapshot.Players = allGames[lobbyIndex].Players
+			snapshot.Turn = draftTeam(snapshot.Players)
+		}
+		if i := checkForBoVotesId(allVotes, gameId); i != -1 {
+			snapshot.Votes = allVotes[i].Votes
+			snapshot.MyVote = allVotes[i].Voters[requestUsername(r)]
+			snapshot.Voting = true
+		}
+		if i := checkForMapsId(allMaps, gameId); i != -1 {
+			maps := allMaps[i]
+			snapshot.Format = maps.Format
+			snapshot.Maps = maps.mapList
+			snapshot.MapTurn = checkMapPhaseAndTeam(gameId, CountMapValuesInMapStruct(maps.mapList, 1), CountMapValuesInMapStruct(maps.mapList, 2), maps.Format)
+			snapshot.Voting = false
+		}
+		if i := checkForSidesId(allSides, gameId); i != -1 {
+			snapshot.Sides = allSides[i].Sides
+		}
+		data, _ := json.Marshal(snapshot)
+		client.ch <- fmt.Sprintf("event: snapshot\ndata: %s\n\n", data)
+
 		clientsMu.Lock()
 		clients[gameId] = append(clients[gameId], client)
 		clientsMu.Unlock()
+		stateMu.Unlock()
 		defer func() {
 			clientsMu.Lock()
 			clients[gameId] = removeClient(clients[gameId], client)

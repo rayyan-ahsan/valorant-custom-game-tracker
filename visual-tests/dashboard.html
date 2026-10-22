@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ten-player test room</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#10131d;color:#edf0f7;font:15px system-ui,sans-serif}
+  header{padding:26px 32px;border-bottom:1px solid #303646;background:#171c29}h1{font-size:26px;margin:0 0 8px}
+  p{color:#b8c1d5;margin:8px 0;line-height:1.5}.tag{color:#9ee6cf;font-size:12px;letter-spacing:.1em;text-transform:uppercase}
+  nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 12px}button{background:#303b56;color:white;border:1px solid #556380;border-radius:8px;padding:10px 15px;font:inherit;cursor:pointer}
+  button:hover{background:#435273}button:disabled{opacity:.45;cursor:default}.primary{background:#7658d5}.stop{background:#703241}
+  main{padding:22px 32px}.stage{font-size:20px;font-weight:600;margin:0 0 18px}#clients{display:grid;grid-template-columns:repeat(5,minmax(170px,1fr));gap:14px}
+  article{background:#1b2232;border:1px solid #364158;border-radius:12px;overflow:hidden}article h2{font-size:16px;margin:12px 12px 3px}.status{font-size:12px;color:#a9dccf;margin:0 12px 12px;min-height:18px}
+  article img{display:block;width:100%;height:160px;object-fit:contain;background:#10131d}article button{margin:10px 12px;padding:6px 12px;font-size:13px}.details{font-size:11px;margin:0 12px 10px;color:#ffb9b9;overflow-wrap:anywhere}
+  #error{white-space:pre-wrap;color:#ffc1cb;background:#4c2530;padding:16px;border-radius:8px;display:none}#log{margin-top:24px;max-height:210px;overflow:auto;font:13px ui-monospace,monospace;white-space:pre-wrap;line-height:1.7;color:#b8c1d5}
+  @media(max-width:1000px){#clients{grid-template-columns:repeat(2,minmax(170px,1fr))}}@media(max-width:520px){#clients{grid-template-columns:1fr}header,main{padding:18px}}
+</style>
+<header>
+  <div class="tag">Isolated test room · ten separate logins</div>
+  <h1>Watch the whole match come together</h1>
+  <p>Each preview is a live screenshot of a real player session. Focus a player to interact with their browser.</p>
+  <nav>
+    <button class="primary" id="play">▶ Play automatically</button><button id="next">Next stage →</button>
+    <button id="pause">Pause / manual control</button><button id="tile">Tile player windows</button>
+    <button id="cleanup">End finished lobby</button><button class="stop" id="stop">Stop and close</button>
+  </nav>
+  <p>Pausing takes effect between stages. Queue acceptance, voting, and side selection keep their normal app timers during manual control.</p>
+</header>
+<main><div class="stage" id="stage">Preparing players…</div><div id="error"></div><section id="clients" aria-label="Player sessions"></section><div id="log" aria-live="polite"></div></main>
+<script>
+  const token='__TOKEN__';
+  const cards=[];
+  async function command(action,player){
+    const response=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json','X-Visual-Token':token},body:JSON.stringify({action,player})});
+    if(!response.ok){const data=await response.json();alert(data.error);}
+    if(action==='stop'){document.getElementById('stage').textContent='Test room closed. You can close this window.';clearInterval(refreshTimer);clearInterval(imageTimer);}
+  }
+  for(const action of ['play','next','pause','tile','cleanup','stop'])document.getElementById(action).onclick=()=>command(action);
+  async function refresh(){
+    try{
+      const response=await fetch('/api/state',{headers:{'X-Visual-Token':token}});const state=await response.json();
+      document.getElementById('stage').textContent=`${state.busy?'Running · ':state.playing?'Automatic · ':'Paused · '}${state.stageName} · ${state.format.toUpperCase()}`;
+      for(const action of ['play','next'])document.getElementById(action).disabled=state.busy||state.playing||state.stage>=3;
+      document.getElementById('cleanup').disabled=state.busy||state.stage!==3||state.ended;
+      const error=document.getElementById('error');error.style.display=state.error?'block':'none';error.textContent=state.error;
+      state.players.forEach((p,i)=>{
+        if(!cards[i]){
+          const card=document.createElement('article');const title=document.createElement('h2');const status=document.createElement('p');status.className='status';
+          const image=document.createElement('img');image.alt=`Live view of ${p.name}`;const focus=document.createElement('button');focus.textContent='Focus player';focus.onclick=()=>command('focus',i);
+          const details=document.createElement('div');details.className='details';card.append(title,status,image,focus,details);document.getElementById('clients').append(card);cards[i]={title,status,image,details};
+          image.src=`/preview/${i}?token=${token}`;
+        }
+        cards[i].title.textContent=p.name;cards[i].status.textContent=p.status;cards[i].details.textContent=p.errors.join(' · ');
+      });
+      const log=document.getElementById('log');log.textContent=state.log.map(entry=>`${new Date(entry.time).toLocaleTimeString()}  ${entry.message}`).join('\n');log.scrollTop=log.scrollHeight;
+    }catch{document.getElementById('stage').textContent='Runner is no longer connected. Check the terminal for the result.';}
+  }
+  const refreshTimer=setInterval(refresh,1000);const imageTimer=setInterval(()=>cards.forEach((card,i)=>{card.image.src=`/preview/${i}?token=${token}&t=${Date.now()}`;}),3000);refresh();
+</script>
+</html>

@@ -1,96 +1,77 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ProgressBar from 'react-bootstrap/ProgressBar';
 import Button from 'react-bootstrap/Button';
 import Modal from 'react-bootstrap/Modal';
-import "./index.css"
-import "./App.css"
+import "./index.css";
+import "./App.css";
 
-function sendVote(vote, gameId) {
-  fetch(`/api/sendbovote?gameId=${gameId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: 'include',
-    body: JSON.stringify(vote),
-  })
-  .then((res) => res.json)
-  .then((data) => {
-    console.log("voted successfully", data)
-  })
-  .catch((err) => {
-    console.log("error in voting:", err)
-  })
+async function sendVote(vote, gameId) {
+  const response = await fetch(`/api/sendbovote?gameId=${gameId}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify(vote),
+  });
+  if (!response.ok) throw new Error('Could not submit your vote. Please try again.');
 }
 
-function determineResult(votes) {
-  const { bo1, bo2, bo3 } = votes;
-  if (bo1 >= bo2 && bo1 >= bo3) return 'bo1';
-  if (bo2 > bo1 && bo2 >= bo3) return 'bo2';
-  return 'bo3';
-}
-
-function BOPollVote({ show, handleClose, votes, setVotes, hasVoted, setHasVoted, handleSubmitVote, gameId, setFinalResult }) {
+function BOPollVote({ show, handleClose, votes, hasVoted, setHasVoted, handleSubmitVote, gameId, setFinalResult }) {
   const [selectedVote, setSelectedVote] = useState(null);
-  const [hasSubmitted, setHasSubmitted] = useState(hasVoted);
+  const [hasSubmitted, setHasSubmitted] = useState(Boolean(hasVoted));
   const [timer, setTimer] = useState(15);
   const [isPollClosed, setIsPollClosed] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
+  const submitting = useRef(false);
+  const finalizing = useRef(false);
+  const opened = useRef(false);
 
-  useEffect(() => {
-    setHasSubmitted(hasVoted);
-  }, [hasVoted]);
+  useEffect(() => { setHasSubmitted(Boolean(hasVoted)); }, [hasVoted]);
 
-  const handleSubmit = () => {
-    if (selectedVote && !hasSubmitted) {
-      sendVote(selectedVote, gameId)
+  const handleSubmit = async () => {
+    if (!selectedVote || hasSubmitted || submitting.current) return;
+    submitting.current = true;
+    setError('');
+    try {
+      await sendVote(selectedVote, gameId);
       handleSubmitVote(selectedVote);
       setHasSubmitted(true);
-      setHasVoted(true)
-    }
+      setHasVoted(true);
+    } catch (e) { setError(e.message); }
+    finally { submitting.current = false; }
   };
 
-  useEffect(() => {
-    if (!show || isPollClosed) return;
-
-    
-    const countdown = setInterval(() => {
-      setTimer((prev) => {
-        if (prev <= 1) {
-          clearInterval(countdown);
-          setIsLoading(true)
-          const localResult = determineResult(votes)
-          console.log("local result atm: ", localResult)
-          setFinalResult(localResult)
-
-          fetch(`/api/finalseriesvote?gameId=${gameId}`)
-            .then(res => res.json())
-            .then(data => {
-              console.log("server result: ", data)
-              setFinalResult(data); // Update with server result
-              setIsLoading(false);
-              handleClose();
-            })
-            .catch(err => {
-              console.error("Error fetching final vote:", err);
-              setIsLoading(false);
-              handleClose();
-            });
-
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(countdown);
-  }, [show, isPollClosed, handleClose, votes, gameId, setFinalResult]);
-
-  useEffect(() => {
-    const totalVotes = votes.bo1 + votes.bo2 + votes.bo3;
-    if (totalVotes >= 10 || votes.bo1 >= 6 || votes.bo2 >= 6 || votes.bo3 >= 6) {
+  const finalize = useCallback(async () => {
+    if (finalizing.current) return;
+    finalizing.current = true;
+    setIsLoading(true);
+    setError('');
+    try {
+      const response = await fetch(`/api/finalseriesvote?gameId=${gameId}`, { credentials: 'include' });
+      if (!response.ok) throw new Error('Could not retrieve the match format. Retry below.');
+      setFinalResult(await response.json());
       setIsPollClosed(true);
       handleClose();
+    } catch (e) { setError(e.message); }
+    finally { setIsLoading(false); }
+  }, [gameId, handleClose, setFinalResult]);
+
+  useEffect(() => {
+    if (!show) { opened.current = false; return; }
+    if (!opened.current) {
+      opened.current = true;
+      setTimer(15);
+      setIsPollClosed(false);
+      finalizing.current = false;
     }
-  }, [votes, handleClose]);
+    const countdown = setInterval(() => setTimer(value => Math.max(0, value - 1)), 1000);
+    return () => clearInterval(countdown);
+  }, [show]);
+
+  useEffect(() => {
+    const count = votes.bo1 + votes.bo2 + votes.bo3;
+    // Keep the poll available to all ten people, then use the server result.
+    // Fetching outside a state updater also avoids duplicate StrictMode effects.
+    if (show && !isPollClosed && (count >= 10 || timer === 0)) void finalize();
+  }, [show, isPollClosed, votes, timer, finalize]);
 
   const handleVoteClick = (format) => {
     if (!hasSubmitted) {
@@ -111,8 +92,10 @@ function BOPollVote({ show, handleClose, votes, setVotes, hasVoted, setHasVoted,
         </span>
       </Modal.Header>
       <Modal.Body className="text-center py-4 bg-dark text-white" style={{ padding: '20px'}}>
+        {error && <div role="alert">{error}</div>}
+        {error && finalizing.current && <Button onClick={() => { finalizing.current = false; void finalize(); }}>Retry result</Button>}
         <div className="vote-options" id="progressBarContainer">
-          <div onClick={() => handleVoteClick('bo1')} className="mb-3 position-relative progressBar">
+          <div data-testid="vote-bo1" onClick={() => handleVoteClick('bo1')} className="mb-3 position-relative progressBar">
             <ProgressBar 
               now={(votes.bo1 / totalVotes) * 100} 
               label={<span>BO1</span>}
@@ -140,7 +123,7 @@ function BOPollVote({ show, handleClose, votes, setVotes, hasVoted, setHasVoted,
               {votes.bo1}
             </span>
           </div>
-          <div onClick={() => handleVoteClick('bo2')} className="mb-3 position-relative progressBar">
+          <div data-testid="vote-bo2" onClick={() => handleVoteClick('bo2')} className="mb-3 position-relative progressBar">
             <ProgressBar 
               now={(votes.bo2 / totalVotes) * 100} 
               label={<span>BO2</span>}
@@ -168,7 +151,7 @@ function BOPollVote({ show, handleClose, votes, setVotes, hasVoted, setHasVoted,
               {votes.bo2}
             </span>
           </div>
-          <div onClick={() => handleVoteClick('bo3')} className="position-relative progressBar">
+          <div data-testid="vote-bo3" onClick={() => handleVoteClick('bo3')} className="position-relative progressBar">
             <ProgressBar 
               now={(votes.bo3 / totalVotes) * 100} 
               label={<span>BO3</span>}

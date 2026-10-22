@@ -91,6 +91,7 @@ const initialMaps = [['Abyss', 0, 0] , ['Ascent',0,0], ['Bind',0,0], ['Haven',0,
 
 function GamePage() {
   const [players, setPlayers] = useState([]);
+  const [actionError, setActionError] = useState('');
   const [currentTeam, setCurrentTeam] = useState(1);
   const [pickCount, setPickCount] = useState(0);
   const [allPicked, setAllPicked] = useState(false);
@@ -166,31 +167,6 @@ function GamePage() {
     checkLoginStatus();
   }, []);
 
-  useEffect(() => {
-    console.log("checking map veto")
-    const allPlayersAssigned = players.every(player => player[2] !== 0 && player[2] !== null);
-    console.log("are all players assigned? :", allPlayersAssigned)
-    if(allPlayersAssigned){
-      fetch(`/api/getmapveto?gameId=${gameId}`, {
-        method: 'GET',
-        credentials: 'include',
-      })
-      .then((res) => res.json())
-      .then((data) => {
-        console.log("yippee")
-        const newMaps = data.mapList.map(m => [m.Name, m.Team, m.Action])
-        setMapList(newMaps)
-        setFinalResult(data.format)
-        setMatchFormat(data.format)
-        setMapPhase(data.mapPhase)
-        setCurrentTeam(Number(data.mapTeam))
-        console.log(data)
-      })
-      .catch((err) => {
-        console.log("getmapveto err:",err)
-      })
-    }
-  }, [players])
 
   useEffect(() => {
     console.log("Final Result has changed:", finalResult)
@@ -200,34 +176,14 @@ function GamePage() {
     console.log("current team has changed:", currentTeam)
   }, [currentTeam])
 
-  useEffect(() => {
-    console.log("Render conditions:", {
-      votingComplete,
-      finalResult,
-      mapListLength: mapList.length
-    });
-    if (finalResult) {
-      console.log(`The final result is: ${finalResult}`);
-      // Request map list from the server
-      fetch(`/api/getmaplist?gameId=${gameId}`, {
-        method: 'GET',
-        credentials: 'include',
-      })
-      .then(response => response.json())
-      .then(data => {
-        setMapList(data.maps);
-      })
-      .catch(error => {
-        console.error("Error fetching map list:", error);
-        //setMapList(initialMaps)
-        setCurrentTeam(1)
-      });
-    }
-  }, [finalResult, gameId])
 
   useEffect(() => {
     currentUserRef.current = currentUser;
   }, [currentUser]);
+
+  useEffect(() => {
+    setCurrentUser(players.find(player => player[0] === username) || null);
+  }, [players, username]);
 
   useEffect(() => {
     currentMapListRef.current = mapList;
@@ -238,14 +194,39 @@ function GamePage() {
     console.log("liveteamview opened")
     const liveTeamView = new EventSource(`/api/liveteamview?gameId=${gameId}`);
     
+    // Each new connection starts with a server snapshot, including events
+    // missed offline. Applying this through the stream preserves event order.
+    liveTeamView.addEventListener('snapshot', (event) => {
+      const state = JSON.parse(event.data);
+      if (!state.active) { setShowKillAlert(true); return; }
+      if (state.players?.length) setPlayers(state.players.map(p => [p.Username, p.Captain, p.Team]));
+      setCurrentTeam(state.turn);
+      if (state.votes) setVotes({ bo1: state.votes[0], bo2: state.votes[1], bo3: state.votes[2] });
+      setHasVoted(previous => ({ ...previous, [state.username]: Boolean(state.myVote) }));
+      setShow(state.voting);
+      if (state.format) {
+        setShow(false);
+        setFinalResult(state.format);
+        setMapList(state.maps.map(m => [m.Name, m.Team, m.Action]));
+        const [phase, team] = state.mapTurn.split(' ');
+        setMapPhase(phase); setCurrentTeam(Number(team));
+        const sides = Object.fromEntries((state.sides || []).map(s => [s.MapName, s.AttackerTeam]));
+        setMapSides(sides);
+        const user = state.players?.find(p => p.Username === state.username);
+        const pending = state.maps.find(m => m.Action === 1 && !sides[m.Name] && m.Team !== user?.Team);
+        if (user?.Captain === 1 && pending) {
+          setSideMap(pending.Name); setMeTeamBoyo(user.Team); setShowSideSelect(true);
+        }
+      }
+    });
+    liveTeamView.addEventListener('format', (event) => {
+      setFinalResult(JSON.parse(event.data)); setShow(false);
+    });
+
     liveTeamView.addEventListener('updateLobby', (event) => {
       const message = JSON.parse(event.data);
       console.log("new players :33333 :", event.data)
       setPlayers(message.map(d => [d.Username, d.Captain, d.Team]));
-      const currentUserData = players.find(player => player[0] === username);
-      if(currentUserData){
-        setCurrentUser(currentUserData);
-      }
     });
 
     liveTeamView.addEventListener('kill', (event) => {
@@ -257,18 +238,18 @@ function GamePage() {
     liveTeamView.addEventListener('mapList', (event) => {
       const maps = JSON.parse(event.data);
       console.log("received maps uwu:", maps)
-      const previousMapList = currentMapListRef.current
+      const previousMapList = currentMapListRef.current || [];
+      const user = currentUserRef.current;
       const newMapList = maps.map(m => [m.Name, m.Team, m.Action])
       const newPickedMaps = newMapList.filter(map => {
         const previousMap = previousMapList.find(prevMap => prevMap[0] === map[0]);
-        return previousMap && previousMap[2] === 0 && map[2] === 1 && map[1] !== currentUserRef.current[2];
+        return user && previousMap && previousMap[2] === 0 && map[2] === 1 && map[1] !== user[2];
     });
       setMapList(maps.map(m => [m.Name, m.Team, m.Action]))
-      const allPlayersAssigned = players.every(player => player[2] !== 0 && player[2] !== null);
-      if(isUserCaptain && allPlayersAssigned && newPickedMaps.length > 0 && (newPickedMaps[0][1] !== currentUserRef.current[2])) {
+      if(user?.[1] === 1 && newPickedMaps.length > 0) {
         console.log("its me hehehe")
         setSideMap(newPickedMaps[0][0])
-        setMeTeamBoyo(currentUserRef.current[2])
+        setMeTeamBoyo(user[2])
         console.log("showSideSelect :3", showSideSelect)
         setShowSideSelect(true)
       }
@@ -452,6 +433,7 @@ function GamePage() {
       setCurrentTeam(currentTeam === 1 ? 2: 1)
     }
     */
+    setActionError('');
     fetch("/api/updateteam", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -462,12 +444,15 @@ function GamePage() {
         "Team": currentTeam
       })
     })
-    .then((res) => res.json())
+    .then((res) => {
+      if (!res.ok) throw new Error('Could not draft this player. Please try again.');
+      return res.json();
+    })
     .then((data) => {
       console.log("updated team: ", data)
     })
     .catch((err) => {
-      console.log(err.message);
+      setActionError('Could not draft this player. Please try again.');
     })
     //newPlayers[playerIndex][2] = currentTeam;
     
@@ -480,20 +465,11 @@ function GamePage() {
   const vote = (playerName, format) => {
     if (hasVoted[playerName]) return;
 
-    setVotes(prevVotes => ({
-      ...prevVotes,
-      [format]: prevVotes[format] + 1
-    }));
-
     setHasVoted(prevHasVoted => ({
       ...prevHasVoted,
       [playerName]: true
     }));
 
-    if (Object.keys(hasVoted).length + 1 === players.filter(player => player[2] !== 0).length) {
-      setVotingComplete(true);
-      determineMatchFormat();
-    }
 
   };
 
@@ -553,6 +529,7 @@ function GamePage() {
       .map(([name]) => (
         <div 
           key={name} 
+          data-testid={`draft-${name}`}
           className={`player ${isUsersTurn() ? 'selectable' : ''}`} 
           onClick={() => isUsersTurn() ? pickPlayer(name) : null}
         >
@@ -580,126 +557,25 @@ function GamePage() {
     return mapImages[mapName] || 'default_image_url';
   };
 
-  const handleMapAction = (mapName) => {
-    console.log("this is mapname? :", mapName)
-    const currentTime = new Date().getTime();
-    if (currentTime - lastClickTime.current < 300) { // 300ms debounce time
-      console.log("Click too soon, ignoring");
-      return;
+  const handleMapAction = async (mapName) => {
+    if (!currentUser || !isUsersTurn() || mapPhase === 'done') return;
+    if (!mapList.some(map => map[0] === mapName && map[2] === 0)) return;
+    const now = Date.now();
+    if (now - lastClickTime.current < 300) return;
+    lastClickTime.current = now;
+    setActionError('');
+    try {
+      const response = await fetch('/api/updatemap', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gameId, mapName, Team: currentTeam, Action: mapPhase, FinalVote: finalResult }),
+      });
+      if (!response.ok) throw new Error('Map selection failed');
+      // Live server events update maps and turns. A failed request must not
+      // optimistically disable a map or advance the turn on this browser.
+    } catch {
+      setActionError('Could not select this map. Please try again.');
     }
-    lastClickTime.current = currentTime;
-    if (!currentUser || !isUsersTurn()) return;
-    const mapPick = mapList.filter(map => map[0] === mapName)
-    console.log("mapPick is", mapPick)
-    if(mapPick[0][2] === 2 || mapPick[0][2] === 1){
-      console.log("this map has already been picked")
-      return;
-    }
-    const bannedCountOg = mapList.filter(map => map[2] === 2).length;
-    const pickedCountOg = mapList.filter(map => map[2] === 1).length;
-    if (finalResult == "bo1") {
-      if (pickedCountOg == 1) {
-        return
-      }
-    } else if (finalResult == "bo2") {
-      if (pickedCountOg == 2) {
-        return
-      }
-    } else if (finalResult == "bo3") {
-      if (pickedCountOg == 2 && bannedCountOg == 4) {
-        return
-      }
-    }
-
-    setCurrentTeam(0)
-
-    fetch("/api/updatemap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: 'include',
-      body: JSON.stringify({
-        "gameId": gameId,
-        "mapName": mapName,
-        "Team": currentTeam,
-        "Action": mapPhase,
-        "FinalVote": finalResult,
-      })
-    })
-    .then((res) => res.json())
-    .then((data) => {
-      console.log("updated maps: ", data)
-    })
-    .catch((err) => {
-      console.log(err.message);
-    })
-
-    const updatedMapList = mapList.map(map =>
-      map[0] === mapName
-        ? [map[0], currentTeam, mapPhase === 'ban' ? 2 : 1]
-        : map
-    );
-    setMapList(updatedMapList);
-
-    //setCurrentTeam(currentTeam === 1 ? 2 : 1);
-
-    const bannedCount = updatedMapList.filter(map => map[2] === 2).length;
-    const pickedCount = updatedMapList.filter(map => map[2] === 1).length;
-    
-    switch (finalResult) {
-      case "bo1": {
-        if (pickedCount == 1){
-          setMapPhase("done")
-        }
-      }
-      case "bo2": {
-        if (pickedCount == 2){
-          setMapPhase("done")
-        }
-      }
-      case "bo3": {
-        if (pickedCount == 2 && bannedCount == 4){
-          setMapPhase("done")
-        }
-      }
-    }
-    /*
-
-    // Switch teams
-    
-
-    if(finalResult === 'bo1'){
-      if(bannedCount === 4){
-        setMapPhase('pick')
-      }
-    } else if(finalResult === 'bo2') {
-      if(bannedCount === 1){
-        setMapPhase('pick')
-      }
-    } else if (finalResult === 'bo3') {
-      if(bannedCount === 1){
-        setMapPhase('pick')
-      } else if(bannedCount === 2 && pickedCount === 1){
-        setMapPhase('ban')
-      }
-    }
-      */
-
-    /*
-
-    // Determine next phase
-    if (finalResult === 'bo1' && bannedMaps.length === 6) {
-      setPickedMaps([...pickedMaps, maps[0]]);
-      setMaps([]);
-    } else if (finalResult === 'bo2' && pickedMaps.length === 1 && maps.length === 1) {
-      setPickedMaps([...pickedMaps, maps[0]]);
-      setMaps([]);
-    } else if (finalResult === 'bo3' && pickedMaps.length === 2 && maps.length === 1) {
-      setPickedMaps([...pickedMaps, maps[0]]);
-      setMaps([]);
-    } else if (bannedMaps.length === 4) {
-      setMapPhase('pick');
-    }
-      */
   };
 
   const renderMapPickBan = () => {
@@ -760,6 +636,7 @@ function GamePage() {
                     .map((map) => (
                         <div
                             key={map[0]}
+                            data-testid={`map-${map[0]}`}
                             className={`map-container ${map[2] !== 0 ? 'disabled' : ''}`}
                             onClick={() => handleMapAction(map[0])}
                         >
@@ -788,6 +665,7 @@ function GamePage() {
 
   return (
     <>
+    {actionError && <div role="alert" className="alert alert-danger">{actionError}</div>}
     <div className="game-page">
       <BOPollVote
       show={show} 
@@ -834,4 +712,4 @@ function GamePage() {
 
 export default GamePage;
 
-//(votingComplete || finalResult) && 
+//(votingComplete || finalResult) &&

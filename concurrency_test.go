@@ -228,6 +228,59 @@ func TestTenPlayerHeartbeatCleanup(t *testing.T) {
 		}
 		return nil
 	})
+	// Disconnect all ten browsers and sweep during the reconnect grace period.
+	for _, conn := range conns {
+		conn.Close()
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		disconnected := 0
+		mu.Lock()
+		for _, p := range players {
+			active := players3[p.name]
+			active.mu.Lock()
+			if active.disconnected {
+				disconnected++
+			}
+			active.mu.Unlock()
+		}
+		mu.Unlock()
+		if disconnected == 10 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server did not observe disconnected clients")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sweepClients(db, app.queuePlayers, time.Now().Add(2*time.Second))
+	stateMu.Lock()
+	queuedDuringOutage := len(*app.queuePlayers)
+	stateMu.Unlock()
+	if queuedDuringOutage != 10 {
+		t.Fatalf("brief outage removed queued players: %d", queuedDuringOutage)
+	}
+	together(t, 10, func(i int) error {
+		p := players[i]
+		dialer := websocket.Dialer{TLSClientConfig: p.client.Transport.(*http.Transport).TLSClientConfig, HandshakeTimeout: 3 * time.Second}
+		conn, _, err := dialer.Dial(strings.Replace(p.base, "https:", "wss:", 1)+"/heartbeat?username="+p.name, nil)
+		if err != nil {
+			return err
+		}
+		conns[i] = conn
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if err := conn.WriteJSON(Message{Type: "ping"}); err != nil {
+			return err
+		}
+		var pong Message
+		if err := conn.ReadJSON(&pong); err != nil {
+			return err
+		}
+		if pong.Type != "pong" {
+			return fmt.Errorf("reconnected client did not receive pong")
+		}
+		return nil
+	})
 	// Advance the sweep's clock, without sleeping for the inactivity timeout.
 	sweepClients(db, app.queuePlayers, time.Now().Add(16*time.Second))
 	stateMu.Lock()

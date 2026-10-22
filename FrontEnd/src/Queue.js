@@ -143,13 +143,8 @@ function Queue() {
     newSocket.onclose = () => {
         console.log('WebSocket connection closed. Attempting to reconnect...');
         setIsConnected(false);
-        setInQueue(false);
-        clearInterval(timerInterval)
-        setTimerInterval(null)
-        const button = document.getElementById("queueBtn")
-        button.className = "btn btn-lg btn-success btn-change"
-        button.textContent = "Join Queue"
-        //setTimeout(connectWebSocket, 5000);
+        setSocket(null);
+
     };
 
     newSocket.onerror = (error) => {
@@ -158,6 +153,20 @@ function Queue() {
 
     setSocket(newSocket);
   }, [username]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const heartbeat = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
+    }, 5000);
+    return () => { clearInterval(heartbeat); socket.close(); };
+  }, [socket]);
+
+  useEffect(() => {
+    if (!inQueue || !username || socket) return;
+    const retry = setTimeout(connectWebSocket, 500);
+    return () => clearTimeout(retry);
+  }, [inQueue, username, socket, connectWebSocket]);
 
   const checkLoginStatus = async () => {
     try {
@@ -285,7 +294,7 @@ function Queue() {
     .then((data) => {
       console.log(data);
       setInQueue(true)
-      connectWebSocket()
+
     })
     .catch((err) => {
       clearInterval(timerInterval)
@@ -306,7 +315,7 @@ function Queue() {
     if(inQueue){
       console.log("hihihi")
 
-      const inQueueEventSource = new EventSource('/api/inqueue');
+      inQueueEventSource = new EventSource('/api/inqueue');
 
       inQueueEventSource.addEventListener('message', (event) => {
         const message = event.data;

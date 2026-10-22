@@ -204,47 +204,70 @@ func matchFound(p flowPlayer) (string, error) {
 	return "", fmt.Errorf("%s never received a match: %v", p.name, scanner.Err())
 }
 
+func prepareFlowLobby(t *testing.T, players []flowPlayer) string {
+	t.Helper()
+	together(t, 10, func(i int) error {
+		_, err := players[i].ok("/queue", Queuers{Username: players[i].name})
+		return err
+	})
+	queueStreams := make([]*flowStream, 10)
+	for i := range players {
+		queueStreams[i] = openFlowStreamPath(t, players[i], "/queuenumbers")
+		queueStreams[i].wait(t, "", func(data string) bool { return data == "10 people in queue" })
+	}
+	ids := make([]string, 10)
+	together(t, 10, func(i int) error { var err error; ids[i], err = matchFound(players[i]); return err })
+	id := ids[0]
+	for _, got := range ids {
+		if got != id || len(got) != 5 {
+			t.Fatalf("players received different matches: %v", ids)
+		}
+	}
+	acceptStreams := make([]*flowStream, 10)
+	for i := range players {
+		acceptStreams[i] = openFlowStreamPath(t, players[i], "/api/matchaccepters")
+	}
+	together(t, 20, func(i int) error {
+		if i >= 10 {
+			i %= 10
+			_, err := players[i].ok("/queue", Queuers{Username: players[i].name})
+			return err
+		}
+		_, err := players[i].ok("/api/matchaccepted", Usernamers{Username: players[i].name})
+		return err
+	})
+	for _, stream := range acceptStreams {
+		stream.wait(t, "", func(data string) bool { return data == strings.Repeat("✅", 10) })
+	}
+	together(t, 10, func(i int) error {
+		body, err := players[i].ok("/api/redirecttogame", UserGame{Id: id, Username: players[i].name})
+		if err == nil && strings.TrimSpace(string(body)) != `"REDIRECT GameId:`+id+`"` {
+			return fmt.Errorf("unexpected redirect: %s", body)
+		}
+		return err
+	})
+	for _, stream := range queueStreams {
+		stream.wait(t, "", func(data string) bool { return data == "0 people in queue" })
+	}
+	// The earliest reader must initialize the lobby even if no browser's
+	// /playersinlobby request has arrived yet.
+	initial := lobbyFor(t, players[0], id)
+	if len(initial) != 10 {
+		t.Fatalf("initial read has %d players", len(initial))
+	}
+
+	together(t, 10, func(i int) error {
+		_, err := players[i].ok("/api/playersinlobby", UserGame{Id: id, Username: players[i].name})
+		return err
+	})
+	return id
+}
+
 func TestTenPlayerFlow(t *testing.T) {
 	for _, format := range []string{"bo1", "bo2", "bo3"} {
 		t.Run(format, func(t *testing.T) {
 			db, players, _ := newFlow(t)
-			together(t, 10, func(i int) error {
-				_, err := players[i].ok("/queue", Queuers{Username: players[i].name})
-				return err
-			})
-			queueStreams := make([]*flowStream, 10)
-			for i := range players {
-				queueStreams[i] = openFlowStreamPath(t, players[i], "/queuenumbers")
-				queueStreams[i].wait(t, "", func(data string) bool { return data == "10 people in queue" })
-			}
-			ids := make([]string, 10)
-			together(t, 10, func(i int) error { var err error; ids[i], err = matchFound(players[i]); return err })
-			id := ids[0]
-			for _, got := range ids {
-				if got != id || len(got) != 5 {
-					t.Fatalf("players received different matches: %v", ids)
-				}
-			}
-			acceptStreams := make([]*flowStream, 10)
-			for i := range players { acceptStreams[i] = openFlowStreamPath(t, players[i], "/api/matchaccepters") }
-			together(t, 20, func(i int) error {
-				if i >= 10 { i %= 10; _, err := players[i].ok("/queue", Queuers{Username: players[i].name}); return err }
-				_, err := players[i].ok("/api/matchaccepted", Usernamers{Username: players[i].name})
-				return err
-			})
-			for _, stream := range acceptStreams { stream.wait(t, "", func(data string) bool { return data == strings.Repeat("✅", 10) }) }
-			together(t, 10, func(i int) error {
-				body, err := players[i].ok("/api/redirecttogame", UserGame{Id: id, Username: players[i].name})
-				if err == nil && strings.TrimSpace(string(body)) != `"REDIRECT GameId:`+id+`"` {
-					return fmt.Errorf("unexpected redirect: %s", body)
-				}
-				return err
-			})
-			for _, stream := range queueStreams { stream.wait(t, "", func(data string) bool { return data == "0 people in queue" }) }
-			together(t, 10, func(i int) error {
-				_, err := players[i].ok("/api/playersinlobby", UserGame{Id: id, Username: players[i].name})
-				return err
-			})
+			id := prepareFlowLobby(t, players)
 			lobbies := make([][]Lobby, 10)
 			together(t, 10, func(i int) error {
 				body, err := players[i].ok("/api/getplayers", GameId{Id: id})
@@ -382,7 +405,11 @@ func TestTenPlayerFlow(t *testing.T) {
 			for _, m := range veto.MapList {
 				if m.Action == 1 {
 					together(t, 10, func(int) error {
-						_, err := captains[1].ok("/api/sendsideselect", map[string]interface{}{"gameId": id, "mapName": m.Name, "team": 1, "side": 1})
+						team := 3 - m.Team
+						if m.Team == 3 {
+							team = 1
+						}
+						_, err := captains[team].ok("/api/sendsideselect", map[string]interface{}{"gameId": id, "mapName": m.Name, "team": team, "side": 1})
 						return err
 					})
 				}
@@ -428,7 +455,10 @@ func TestTenPlayerFlow(t *testing.T) {
 }
 
 type flowEvent struct{ name, data string }
-type flowStream struct{ events chan flowEvent }
+type flowStream struct {
+	events chan flowEvent
+	close  func()
+}
 
 func openFlowStream(t *testing.T, p flowPlayer, id string) *flowStream {
 	t.Helper()
@@ -449,7 +479,7 @@ func openFlowStreamPath(t *testing.T, p flowPlayer, path string) *flowStream {
 		t.Fatalf("SSE status %d", resp.StatusCode)
 	}
 	done := make(chan struct{})
-	s := &flowStream{make(chan flowEvent, 256)}
+	s := &flowStream{events: make(chan flowEvent, 256), close: cancel}
 	go func() {
 		defer close(done)
 		defer close(s.events)
